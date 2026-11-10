@@ -1,0 +1,12 @@
+# secrets
+server/.env.local
+.env
+*.env.local
+firmware/app_cc_monitor/cc_monitor_config.h
+# build output
+mac-rs/target/
+mac/cc-watch
+firmware/.work/
+__pycache__/
+.pytest_cache/
+*.bin

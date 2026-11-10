@@ -1,0 +1,470 @@
+"""cc-monitor: merges Claude Code session state from Macs and drives the StackChan display.
+
+  WS  /cc/mac                 Macs (cc-watch) send snapshots/updates   (Authorization: Bearer <mac token>)
+  WS  /<secret>/cc/robot      the robot receives display states        (Authorization: Bearer <robot token>)
+  GET /cc/preview             browser preview of the robot's display   (?token=<preview token> if set)
+  GET /healthz
+
+Configuration (environment): LISTEN_HOST, LISTEN_PORT, MAC_TOKENS (comma-separated), ROBOT_TOKEN,
+ROBOT_SECRET, PREVIEW_TOKEN (optional), QUIET_HOURS (e.g. "22-8", empty = none), TZ_OFFSET_MINUTES.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hmac
+import json
+import logging
+import os
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import aiohttp
+from aiohttp import WSMsgType, web
+
+log = logging.getLogger("cc-monitor")
+
+AWAY_IDLE_S = 120          # Mac idle longer than this when a session starts waiting = you are away
+CHIME_REPEAT_S = 120
+CHIME_MAX = 5
+JUST_FINISHED_S = 5
+HEARTBEAT_TIMEOUT_S = 180  # three missed 60 s heartbeats
+OFFLINE_DROP_S = 300
+MAX_ROWS = 4
+
+WAITING_TEXT = {
+    "input needed": "needs your input",
+    "dialog open": "dialog open",
+    "sandbox request": "wants network access",
+    "goal proposal": "goal to approve",
+}
+LEDS = {"needs_you": "flash", "working": "yellow_breathe", "all_done": "green", "none": "off", "offline": "dim_white"}
+RANK = {"needs_you": 0, "working": 1, "ready": 2}
+
+
+def state_of(status: str | None) -> str:
+    """Session file status -> robot state. Unknown values count as working (format may change)."""
+    if status == "waiting":
+        return "needs_you"
+    if status == "idle":
+        return "ready"
+    return "working"  # busy, shell, or anything new
+
+
+@dataclass
+class Session:
+    host: str
+    id: str
+    data: dict[str, Any]
+    state: str
+    since: float                       # epoch seconds the current state started
+    acked: bool = False
+    chimes: int = 0
+    last_chime: float = 0.0
+    away: bool = False
+
+
+@dataclass
+class Mac:
+    host: str
+    last_seen: float
+    ws: web.WebSocketResponse | None = None
+
+
+@dataclass
+class Monitor:
+    quiet_hours: tuple[int, int] | None = None
+    tz_offset_min: int = 0
+    sessions: dict[tuple[str, str], Session] = field(default_factory=dict)
+    macs: dict[str, Mac] = field(default_factory=dict)
+    finished_at: float = 0.0           # last busy -> idle transition, for the "just finished" nod
+
+    # ---------------------------------------------------------------- input from Macs
+
+    def apply(self, host: str, msg: dict[str, Any], now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        mac = self.macs.setdefault(host, Mac(host, now))
+        mac.last_seen = now
+        kind = msg.get("type")
+        if kind == "snapshot":
+            live = {s["id"] for s in msg.get("sessions", []) if s.get("id")}
+            for key in [k for k in self.sessions if k[0] == host and k[1] not in live]:
+                del self.sessions[key]
+            for s in msg.get("sessions", []):
+                self._upsert(host, s, now)
+        elif kind == "update":
+            for s in msg.get("sessions", []):
+                self._upsert(host, s, now)
+        elif kind == "gone":
+            self.sessions.pop((host, str(msg.get("id"))), None)
+        elif kind == "heartbeat":
+            live = set(msg.get("ids", []))
+            for key in [k for k in self.sessions if k[0] == host and k[1] not in live]:
+                del self.sessions[key]
+
+    def _upsert(self, host: str, s: dict[str, Any], now: float) -> None:
+        if not s.get("id") or s.get("kind") in ("daemon", "daemon-worker"):
+            return
+        key = (host, s["id"])
+        new_state = state_of(s.get("status"))
+        since = (s.get("since") or now * 1000) / 1000
+        old = self.sessions.get(key)
+        if old is None or old.state != new_state:
+            if old is not None and old.state == "working" and new_state == "ready":
+                self.finished_at = now
+            sess = Session(host, s["id"], s, new_state, since)
+            if new_state == "needs_you":
+                sess.away = (s.get("idleSec") or 0) > AWAY_IDLE_S
+            self.sessions[key] = sess
+        else:
+            old.data = s
+
+    def expire(self, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        for host, mac in list(self.macs.items()):
+            if now - mac.last_seen > HEARTBEAT_TIMEOUT_S + OFFLINE_DROP_S:
+                for key in [k for k in self.sessions if k[0] == host]:
+                    del self.sessions[key]
+                del self.macs[host]
+
+    def offline(self, host: str, now: float) -> bool:
+        mac = self.macs.get(host)
+        return mac is None or now - mac.last_seen > HEARTBEAT_TIMEOUT_S
+
+    # ---------------------------------------------------------------- output to the robot
+
+    def _quiet(self, now: float) -> bool:
+        if not self.quiet_hours:
+            return False
+        hour = int(((now / 60 + self.tz_offset_min) // 60) % 24)
+        start, end = self.quiet_hours
+        return (start <= hour or hour < end) if start > end else (start <= hour < end)
+
+    def display(self, now: float | None = None, quiet_mode: bool = False) -> dict[str, Any]:
+        """The whole display state the robot draws (also used by the preview)."""
+        now = time.time() if now is None else now
+        rows = sorted(self.sessions.values(),
+                      key=lambda s: (RANK[s.state], s.since if s.state == "needs_you" else -s.since))
+        if any(s.state == "needs_you" for s in rows):
+            mood = "needs_you"
+        elif any(s.state == "working" for s in rows):
+            mood = "working"
+        elif rows:
+            mood = "just_finished" if now - self.finished_at < JUST_FINISHED_S else "all_done"
+        else:
+            mood = "none"
+        chime = False
+        if not quiet_mode and not self._quiet(now):
+            for s in rows:
+                if (s.state == "needs_you" and s.away and not s.acked and s.chimes < CHIME_MAX
+                        and now - s.last_chime >= CHIME_REPEAT_S):
+                    chime = True
+                    s.chimes += 1
+                    s.last_chime = now
+        led_mood = "all_done" if mood == "just_finished" else mood
+        return {
+            "type": "display",
+            "mood": mood,
+            "leds": LEDS[led_mood],
+            "chime": chime,
+            "rows": [self._row(s, now) for s in rows[:MAX_ROWS]],
+            "more": max(0, len(rows) - MAX_ROWS),
+            "count": len(rows),
+            "counts": {k: sum(1 for s in rows if s.state == k) for k in ("needs_you", "working", "ready")},
+            "quiet": quiet_mode,
+        }
+
+    def _row(self, s: Session, now: float) -> dict[str, Any]:
+        d = s.data
+        detail = {"needs_you": WAITING_TEXT.get(d.get("waitingFor") or "", "needs you"),
+                  "working": "working", "ready": "ready"}[s.state]
+        return {
+            "session": s.id, "host": s.host, "project": d.get("project") or "?",
+            "name": d.get("name") or "", "tab": d.get("tab") or "", "state": s.state,
+            "detail": detail, "since": int(s.since * 1000), "ghostty": bool(d.get("terminal")),
+            "offline": self.offline(s.host, now), "ageSec": max(0, int(now - s.since)),
+            "ask": d.get("ask") or "",
+        }
+
+    def action_for(self, session_id: str, action: str, text: str = "") -> tuple[str | None, Any]:
+        """Robot action -> (host, message for that Mac) or (None, reason). The Mac re-checks `since`."""
+        s = next((s for s in self.sessions.values() if s.id == session_id), None)
+        if s is None:
+            return None, "unknown session"
+        if action in ("approve", "reject") and s.state != "needs_you":
+            return None, "not waiting"
+        if not s.data.get("terminal"):
+            return None, "not in Ghostty"
+        return s.host, {"type": "act", "action": action, "session": s.id, "terminal": s.data["terminal"],
+                        "since": s.data.get("since"), "text": text}
+
+    def ack(self) -> None:
+        for s in self.sessions.values():
+            if s.state == "needs_you":
+                s.acked = True
+
+
+# -------------------------------------------------------------------- web app
+
+MON = web.AppKey("monitor", Monitor)
+ROBOTS = web.AppKey("robots", set)
+CFG = web.AppKey("cfg", dict)
+
+
+def _bearer(request: web.Request) -> str:
+    h = request.headers.get("Authorization", "")
+    return h[7:] if h.startswith("Bearer ") else (request.query.get("token") or "")
+
+
+def _ok(token: str, allowed: list[str]) -> bool:
+    return any(hmac.compare_digest(token.encode(), a.encode()) for a in allowed if a)
+
+
+async def push(app: web.Application) -> None:
+    """Send the current display state to every robot and preview, if it changed."""
+    state = app[MON].display(quiet_mode=app[CFG]["quiet_mode"])
+    text = json.dumps(state, sort_keys=True)
+    if text == app[CFG].get("last_sent") and not state["chime"]:
+        return
+    app[CFG]["last_sent"] = text
+    for ws in list(app[ROBOTS]):
+        if not ws.closed:
+            await ws.send_str(text)
+
+
+async def mac_ws(request: web.Request) -> web.StreamResponse:
+    cfg = request.app[CFG]
+    if not _ok(_bearer(request), cfg["mac_tokens"]):
+        raise web.HTTPNotFound()
+    ws = web.WebSocketResponse(heartbeat=30)
+    await ws.prepare(request)
+    host = "?"
+    async for msg in ws:
+        if msg.type != WSMsgType.TEXT:
+            continue
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            continue
+        if data.get("type") == "result":   # outcome of an approve/reject/send, shown on the robot
+            await _to_robots(request.app, data)
+            continue
+        host = str(data.get("host") or host)
+        mac = request.app[MON].macs.setdefault(host, Mac(host, time.time()))
+        mac.ws = ws
+        request.app[MON].apply(host, data)
+        log.info("mac %s: %s (%d sessions)", host, data.get("type"), len(data.get("sessions", [])))
+        await push(request.app)
+    log.info("mac %s disconnected", host)
+    return ws
+
+
+async def robot_ws(request: web.Request) -> web.StreamResponse:
+    cfg = request.app[CFG]
+    if not _ok(_bearer(request), [cfg["robot_token"]]):
+        raise web.HTTPNotFound()
+    return await _display_socket(request, can_touch=True)
+
+
+async def preview_ws(request: web.Request) -> web.StreamResponse:
+    cfg = request.app[CFG]
+    if cfg["preview_token"] and not _ok(_bearer(request), [cfg["preview_token"]]):
+        raise web.HTTPNotFound()
+    return await _display_socket(request, can_touch=True)
+
+
+async def _display_socket(request: web.Request, can_touch: bool) -> web.StreamResponse:
+    ws = web.WebSocketResponse(heartbeat=45)
+    await ws.prepare(request)
+    app = request.app
+    app[ROBOTS].add(ws)
+    await ws.send_str(json.dumps(app[MON].display(quiet_mode=app[CFG]["quiet_mode"]), sort_keys=True))
+    audio = bytearray()
+    ptt: dict[str, Any] = {}
+    try:
+        async for msg in ws:
+            if msg.type == WSMsgType.BINARY:
+                if ptt and len(audio) < 60 * 2 * int(ptt.get("rate", 16000)):   # 60 s cap
+                    audio.extend(msg.data)
+                continue
+            if msg.type != WSMsgType.TEXT or not can_touch:
+                continue
+            data = json.loads(msg.data)
+            kind = data.get("type")
+            if kind == "touch":
+                await handle_touch(app, data)
+            elif kind in ("act", "send", "focus"):
+                action = {"send": "send", "focus": "focus"}.get(kind, data.get("action", ""))
+                await route_action(app, ws, str(data.get("session")), action, str(data.get("text") or ""))
+            elif kind == "ptt_start":
+                audio.clear()
+                ptt = {"session": data.get("session"), "rate": int(data.get("rate") or 16000)}
+            elif kind == "ptt_end" and ptt:
+                pcm, info = bytes(audio), ptt
+                audio.clear()
+                ptt = {}
+                asyncio.create_task(transcribe_and_reply(app, ws, info, pcm))
+    finally:
+        app[ROBOTS].discard(ws)
+    return ws
+
+
+async def _to_robots(app: web.Application, data: dict[str, Any]) -> None:
+    text = json.dumps(data)
+    for ws in list(app[ROBOTS]):
+        if not ws.closed:
+            await ws.send_str(text)
+
+
+async def route_action(app: web.Application, ws, session: str, action: str, text: str) -> None:
+    mon = app[MON]
+    host, msg = mon.action_for(session, "send" if action == "focus" else action, text)
+    if host is None:
+        await ws.send_str(json.dumps({"type": "result", "session": session, "ok": False, "error": msg}))
+        return
+    if action == "focus":
+        msg = {"type": "focus", "terminal": msg["terminal"]}
+    mac = mon.macs.get(host)
+    if not mac or not mac.ws or mac.ws.closed:
+        await ws.send_str(json.dumps({"type": "result", "session": session, "ok": False, "error": "Mac offline"}))
+        return
+    log.info("robot -> %s: %s %s", host, action, session)
+    await mac.ws.send_str(json.dumps(msg))
+
+
+def _wav(pcm: bytes, rate: int) -> bytes:
+    import struct
+    return (b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVEfmt " +
+            struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16) + b"data" + struct.pack("<I", len(pcm)) + pcm)
+
+
+async def transcribe(pcm: bytes, rate: int) -> str:
+    """Speech -> text with Gemini (GEMINI_API_KEY). Returns "" when nothing was said."""
+    import base64
+    key = os.environ.get("GEMINI_API_KEY", "")
+    if not key:
+        raise RuntimeError("GEMINI_API_KEY not set")
+    body = {"contents": [{"parts": [
+        {"text": "You are a speech-to-text engine. Transcribe the spoken words in this audio verbatim. "
+                 "Never invent, complete or summarise anything. If there is no clearly spoken human speech "
+                 "(silence, noise, tones, music), output exactly NO_SPEECH. Output only the transcript."},
+        {"inline_data": {"mime_type": "audio/wav", "data": base64.b64encode(_wav(pcm, rate)).decode()}}]}]}
+    # Fallback chain: preview/new models are often overloaded, so move on rather than fail.
+    models = [m.strip() for m in os.environ.get(
+        "STT_MODELS", "gemini-3.5-flash,gemini-flash-lite-latest,gemini-3.8-flash,gemini-flash-latest").split(",") if m.strip()]
+    last_err = "no model available"
+    j: dict[str, Any] = {}
+    async with aiohttp.ClientSession() as s:
+        for model in models:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            async with s.post(url, json=body, headers={"x-goog-api-key": key},
+                              timeout=aiohttp.ClientTimeout(total=30)) as r:
+                j = await r.json()
+                if r.status == 200:
+                    break
+                last_err = f"{model}: {j.get('error', {}).get('message') or r.status}"
+                log.warning("stt %s", last_err)
+                if r.status not in (404, 429, 500, 503):
+                    raise RuntimeError(last_err)
+        else:
+            raise RuntimeError(last_err)
+    parts = j.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+    text = "".join(p.get("text", "") for p in parts).strip()
+    return "" if "NO_SPEECH" in text else text
+
+
+async def transcribe_and_reply(app: web.Application, ws, info: dict[str, Any], pcm: bytes) -> None:
+    session = info.get("session")
+    try:
+        if len(pcm) < info["rate"] // 2:   # under 0.25 s
+            raise RuntimeError(f"too short ({len(pcm)} bytes)")
+        text = await transcribe(pcm, info["rate"])
+        log.info("transcribed %.1f s for %s: %r", len(pcm) / 2 / info["rate"], session, text[:80])
+        reply = {"type": "transcript", "session": session, "text": text}
+    except Exception as e:  # noqa: BLE001 - report any failure to the robot
+        log.warning("transcription failed: %s", e)
+        reply = {"type": "transcript", "session": session, "text": "", "error": str(e)}
+    if not ws.closed:
+        await ws.send_str(json.dumps(reply))
+
+
+async def handle_touch(app: web.Application, data: dict[str, Any]) -> None:
+    mon, gesture = app[MON], data.get("gesture")
+    if gesture == "tap":
+        mon.ack()
+    elif gesture == "long_press":
+        app[CFG]["quiet_mode"] = not app[CFG]["quiet_mode"]
+    elif gesture == "double_tap":
+        rows = mon.display()["rows"]
+        idx = int(data.get("row", 0))
+        if 0 <= idx < len(rows):
+            row = rows[idx]
+            sess = mon.sessions.get((row["host"], row["session"]))
+            mac = mon.macs.get(row["host"])
+            if sess and mac and mac.ws and not mac.ws.closed and sess.data.get("terminal"):
+                await mac.ws.send_str(json.dumps({"type": "focus", "terminal": sess.data["terminal"]}))
+    app[CFG]["last_sent"] = None
+    await push(app)
+
+
+async def preview(request: web.Request) -> web.Response:
+    cfg = request.app[CFG]
+    if cfg["preview_token"] and not _ok(_bearer(request), [cfg["preview_token"]]):
+        raise web.HTTPNotFound()
+    return web.FileResponse(Path(__file__).with_name("preview.html"))
+
+
+async def healthz(_: web.Request) -> web.Response:
+    return web.json_response({"ok": True})
+
+
+def make_app(cfg: dict[str, Any]) -> web.Application:
+    app = web.Application()
+    app[CFG] = {**cfg, "quiet_mode": False, "last_sent": None}
+    app[MON] = Monitor(quiet_hours=cfg.get("quiet_hours"), tz_offset_min=cfg.get("tz_offset_min", 0))
+    app[ROBOTS] = set()
+
+    async def ticker(app: web.Application):
+        async def loop():
+            while True:
+                await asyncio.sleep(5)
+                app[MON].expire()
+                await push(app)   # time-based changes: chime repeats, just-finished fade, offline
+        task = asyncio.create_task(loop())
+        yield
+        task.cancel()
+
+    app.cleanup_ctx.append(ticker)
+    app.router.add_get("/cc/mac", mac_ws)
+    app.router.add_get(f"/{cfg['robot_secret']}/cc/robot", robot_ws)
+    app.router.add_get("/cc/preview", preview)
+    app.router.add_get("/cc/preview/ws", preview_ws)
+    app.router.add_get("/healthz", healthz)
+    return app
+
+
+def config_from_env() -> dict[str, Any]:
+    e = os.environ
+    qh = e.get("QUIET_HOURS", "22-8").strip()
+    quiet = tuple(int(x) for x in qh.split("-")) if qh else None
+    cfg = {
+        "host": e.get("LISTEN_HOST", "0.0.0.0"),
+        "port": int(e.get("LISTEN_PORT", "8810")),
+        "mac_tokens": [t.strip() for t in e.get("MAC_TOKENS", "").split(",") if t.strip()],
+        "robot_token": e.get("ROBOT_TOKEN", ""),
+        "robot_secret": e.get("ROBOT_SECRET", ""),
+        "preview_token": e.get("PREVIEW_TOKEN", ""),
+        "quiet_hours": quiet,
+        "tz_offset_min": int(e.get("TZ_OFFSET_MINUTES", "330")),
+    }
+    if not cfg["mac_tokens"] or not cfg["robot_token"] or not cfg["robot_secret"]:
+        raise SystemExit("set MAC_TOKENS, ROBOT_TOKEN and ROBOT_SECRET")
+    return cfg
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    cfg = config_from_env()
+    web.run_app(make_app(cfg), host=cfg["host"], port=cfg["port"], print=None)

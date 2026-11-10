@@ -1,0 +1,26 @@
+diff --git a/main/application.cc b/main/application.cc
+index 50096d8..abab012 100644
+--- a/main/application.cc
++++ b/main/application.cc
+@@ -492,7 +492,7 @@ void Application::CheckNewVersion() {
+         retry_count = 0;
+         retry_delay = 10;  // Reset retry delay
+ 
+-        if (ota_->HasNewVersion()) {
++        if (false && ota_->HasNewVersion()) {  // custom build: auto-update disabled
+             if (UpgradeFirmware(ota_->GetFirmwareUrl(), ota_->GetFirmwareVersion())) {
+                 return;  // This line will never be reached after reboot
+             }
+diff --git a/main/audio/audio_service.cc b/main/audio/audio_service.cc
+index 7f7582b..dd02c98 100644
+--- a/main/audio/audio_service.cc
++++ b/main/audio/audio_service.cc
+@@ -167,7 +167,7 @@ void AudioService::Start() {
+             audio_service->OpusCodecTask();
+             vTaskDelete(NULL);
+         },
+-        "opus_codec", 2048 * 12, this, 2, &opus_codec_task_handle_);
++        "opus_codec", 2048 * 12, this, 4, &opus_codec_task_handle_);  // was 2: LVGL and StackChan tasks at 3 starved decoding (stutter)
+ }
+ 
+ void AudioService::Stop() {

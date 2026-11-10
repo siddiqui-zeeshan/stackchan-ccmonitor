@@ -1,0 +1,4 @@
+// Copy to cc_monitor_config.h (git-ignored) and fill in.
+#pragma once
+#define CC_MONITOR_URL   "wss://your-host/<ROBOT_SECRET>/cc/robot"
+#define CC_MONITOR_TOKEN "<ROBOT_TOKEN>"

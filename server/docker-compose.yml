@@ -1,0 +1,7 @@
+services:
+  cc-monitor:
+    build: .
+    env_file: .env.local
+    ports:
+      - "8810:8810"
+    restart: unless-stopped

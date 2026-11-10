@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StackChan preview</title>
+<style>
+  body { background:#1d1d1f; color:#eee; font:14px -apple-system, system-ui, sans-serif; margin:24px; }
+  .robot { width:320px; height:240px; background:#000; border-radius:12px; overflow:hidden; position:relative;
+           box-shadow:0 0 0 10px #333; margin:30px auto 16px; }
+  .face { height:140px; display:flex; align-items:center; justify-content:center; font-size:64px; }
+  .rows { padding:0 10px; }
+  .row { display:flex; justify-content:space-between; font-size:13px; padding:3px 4px; border-radius:4px; }
+  .row.needs_you { background:#5a3400; } .row .state { opacity:.85; } .more { font-size:12px; opacity:.6; text-align:right; padding-right:8px; }
+  .leds { display:flex; gap:6px; justify-content:center; margin:8px; }
+  .led { width:16px; height:16px; border-radius:50%; background:#222; }
+  .flash .led { background:#ff7a00; animation:blink .5s infinite; } .yellow_breathe .led { background:#ffd60a; animation:breathe 3s ease-in-out infinite; }
+  .green .led { background:#30d158; } .dim_white .led { background:#666; }
+  @keyframes blink { 50% { opacity:.15; } } @keyframes breathe { 0%,100% { opacity:.2; } 50% { opacity:1; } }
+  .meta { text-align:center; opacity:.6; } button { margin:4px; }
+</style></head>
+<body>
+<div class="robot"><div class="face" id="face">😴</div><div class="rows" id="rows"></div></div>
+<div class="leds" id="leds"></div>
+<div class="meta" id="meta">connecting…</div>
+<div class="meta"><button data-g="tap">tap (ack)</button><button data-g="double_tap">double tap row 1 (focus)</button><button data-g="long_press">long press (quiet)</button></div>
+<script>
+const FACES = { needs_you:"😮", working:"🧐", just_finished:"😄", all_done:"🙂", none:"😴" };
+const leds = document.getElementById("leds"); leds.innerHTML = '<div class="led"></div>'.repeat(12);
+const q = new URLSearchParams(location.search).get("token");
+const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/cc/preview/ws${q ? "?token=" + encodeURIComponent(q) : ""}`);
+const ago = ms => { const s = Math.max(0, Math.round((Date.now() - ms) / 1000)); return s < 60 ? s + "s" : Math.round(s / 60) + "m"; };
+ws.onmessage = ev => {
+  const d = JSON.parse(ev.data);
+  document.getElementById("face").textContent = FACES[d.mood] || "🙂";
+  leds.className = "leds " + d.leds;
+  document.getElementById("rows").innerHTML = d.rows.map(r =>
+    `<div class="row ${r.state}"><span>${r.ghostty ? "▣" : "□"} ${r.project} · ${r.name}${r.offline ? " (offline)" : ""}</span><span class="state">${r.detail} ${ago(r.since)}</span></div>`
+  ).join("") + (d.more ? `<div class="more">+${d.more} more</div>` : "");
+  document.getElementById("meta").textContent = `mood: ${d.mood} · leds: ${d.leds} · sessions: ${d.count}${d.chime ? " · 🔔 CHIME" : ""}`;
+};
+ws.onclose = () => document.getElementById("meta").textContent = "disconnected";
+document.querySelectorAll("button").forEach(b => b.onclick = () => ws.send(JSON.stringify({ type:"touch", gesture:b.dataset.g, row:0 })));
+</script>
+</body></html>

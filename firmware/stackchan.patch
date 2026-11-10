@@ -1,0 +1,35 @@
+diff --git a/firmware/main/apps/apps.h b/firmware/main/apps/apps.h
+index 77cc9b7..ad2dab1 100644
+--- a/firmware/main/apps/apps.h
++++ b/firmware/main/apps/apps.h
+@@ -12,3 +12,4 @@
+ #include "app_app_center/app_app_center.h"
+ #include "app_ezdata/app_ezdata.h"
+ #include "app_dance/app_dance.h"
++#include "app_cc_monitor/app_cc_monitor.h"
+diff --git a/firmware/main/hal/hal_ota.cpp b/firmware/main/hal/hal_ota.cpp
+index 01862d9..3fc9b69 100644
+--- a/firmware/main/hal/hal_ota.cpp
++++ b/firmware/main/hal/hal_ota.cpp
+@@ -23,7 +23,8 @@ bool Hal::updateFirmware(std::function<void(std::string_view)> onLog)
+         return false;
+     }
+ 
+-    if (!ota.HasNewVersion()) {
++    // Custom build (CC Monitor app): never replace it with the official firmware automatically.
++    if (true || !ota.HasNewVersion()) {
+         ota.MarkCurrentVersionValid();
+         mclog::tagInfo(_tag, "no new firmware version available");
+         onLog("Already up to date");
+diff --git a/firmware/main/main.cpp b/firmware/main/main.cpp
+index 4c1f20f..54c8846 100644
+--- a/firmware/main/main.cpp
++++ b/firmware/main/main.cpp
+@@ -41,6 +41,7 @@ extern "C" void app_main(void)
+                                      GetMooncake().installApp(std::make_unique<AppAppCenter>()));
+         hal_toggles::register_app_id(hal_toggles::App::Ezdata, GetMooncake().installApp(std::make_unique<AppEzdata>()));
+         hal_toggles::register_app_id(hal_toggles::App::Dance, GetMooncake().installApp(std::make_unique<AppDance>()));
++        GetMooncake().installApp(std::make_unique<AppCcMonitor>());
+         GetMooncake().installApp(std::make_unique<AppSetup>());
+ 
+         // Main loop
