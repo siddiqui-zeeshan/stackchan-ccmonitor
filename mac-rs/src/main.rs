@@ -449,6 +449,20 @@ mod tests {
     );
 
     #[test]
+    fn terminal_matches_by_pid_then_by_tty() {
+        use super::{match_terminal, Term};
+        let terms = vec![
+            Term { id: "A".into(), pid: 100, tty: "/dev/ttys001".into(), name: "tab a".into() },
+            Term { id: "B".into(), pid: 555, tty: "/dev/ttys002".into(), name: "tab b".into() },
+        ];
+        assert_eq!(match_terminal(&terms, 100, "").map(|t| t.id.as_str()), Some("A"));
+        // Claude isn't the tab's foreground process (wrapper, child process), but shares its tty.
+        assert_eq!(match_terminal(&terms, 200, "ttys002").map(|t| t.id.as_str()), Some("B"));
+        assert!(match_terminal(&terms, 300, "ttys009").is_none());
+        assert!(match_terminal(&terms, 300, "").is_none(), "no tty (e.g. not a terminal): no match");
+    }
+
+    #[test]
     fn ready_session_shows_end_of_last_reply() {
         assert_eq!(summarize_transcript(T, "idle"), "Build finished. Should I also run the tests?");
     }

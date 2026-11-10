@@ -533,10 +533,11 @@ void AppCcMonitor::buildUi()
     face->getPanel()->onClick().connect([]() { _tap_flag = true; });
     GetStackChan().attachAvatar(std::move(face));
 
-    // Status chip, top-left: pulsing dot + summary (+ mute icon in quiet mode).
+    // Status chip: bottom centre (mirrors the face); moves to the top-left while the "needs you" card
+    // occupies the bottom. Pulsing dot + summary (+ mute icon in quiet mode).
     _chip = box(scr, C_SURFACE, LV_OPA_80, LV_RADIUS_CIRCLE);
     lv_obj_set_size(_chip, LV_SIZE_CONTENT, 28);
-    lv_obj_set_pos(_chip, 10, 10);
+    lv_obj_align(_chip, LV_ALIGN_BOTTOM_MID, 0, -14);   // stays centred as the text width changes
     lv_obj_set_style_pad_hor(_chip, 12, 0);
     lv_obj_set_flex_flow(_chip, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(_chip, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -773,6 +774,12 @@ void AppCcMonitor::renderTicker(bool advance)
     bool show_card = !_connected || _n_needs > 0;
     if (show_card != !lv_obj_has_flag(_card, LV_OBJ_FLAG_HIDDEN)) {
         show(_card, show_card);
+        if (show_card) {
+            lv_obj_align(_chip, LV_ALIGN_TOP_LEFT, 10, 10);
+        } else {
+            lv_obj_align(_chip, LV_ALIGN_BOTTOM_MID, 0, -14);
+        }
+        fade_in(_chip, 250);
         if (show_card) fade_in(_card, 250);
     }
     lv_label_set_text(_card_title, title.c_str());
