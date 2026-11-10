@@ -91,3 +91,37 @@ def test_robot_action_routes_to_owning_mac_with_prompt_timestamp():
     assert m.action_for("s2", "approve") == (None, "not waiting"), "only waiting sessions can be approved"
     assert m.action_for("s2", "send", "hi") == (None, "not in Ghostty")
     assert m.action_for("nope", "reject") == (None, "unknown session")
+
+
+def test_preview_socket_cannot_approve_or_type():
+    """The browser preview is view-only: actions from it must never reach a Mac."""
+    import asyncio
+    import json as _json
+    from aiohttp.test_utils import TestClient, TestServer
+    from cc_monitor import make_app
+
+    async def run():
+        cfg = {"mac_tokens": ["m"], "robot_token": "r", "robot_secret": "sec", "preview_token": ""}
+        async with TestClient(TestServer(make_app(cfg))) as c:
+            mac = await c.ws_connect("/cc/mac", headers={"Authorization": "Bearer m"})
+            await mac.send_str(_json.dumps({"type": "snapshot", "host": "h", "sessions": [
+                sess(1, "waiting", terminal="ghostty:T1")]}))
+            await asyncio.sleep(0.1)
+            prev = await c.ws_connect("/cc/preview/ws")
+            await prev.receive()
+            for m in ({"type": "act", "action": "approve", "session": "s1"},
+                      {"type": "send", "session": "s1", "text": "rm -rf ~"}):
+                await prev.send_str(_json.dumps(m))
+            got = []
+            try:
+                while True:
+                    got.append(await asyncio.wait_for(mac.receive(), 0.3))
+            except asyncio.TimeoutError:
+                pass
+            assert not [g for g in got if '"act"' in str(g.data)], got
+            robot = await c.ws_connect("/sec/cc/robot", headers={"Authorization": "Bearer r"})
+            await robot.receive()
+            await robot.send_str(_json.dumps({"type": "act", "action": "approve", "session": "s1"}))
+            m = await asyncio.wait_for(mac.receive(), 2)
+            assert _json.loads(m.data)["action"] == "approve", "robot actions still work"
+    asyncio.run(run())

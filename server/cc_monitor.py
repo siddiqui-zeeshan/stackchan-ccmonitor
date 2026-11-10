@@ -265,7 +265,7 @@ async def robot_ws(request: web.Request) -> web.StreamResponse:
     cfg = request.app[CFG]
     if not _ok(_bearer(request), [cfg["robot_token"]]):
         raise web.HTTPNotFound()
-    return await _display_socket(request, can_touch=True)
+    return await _display_socket(request, can_touch=True, can_act=True)
 
 
 async def preview_ws(request: web.Request) -> web.StreamResponse:
@@ -275,7 +275,8 @@ async def preview_ws(request: web.Request) -> web.StreamResponse:
     return await _display_socket(request, can_touch=True)
 
 
-async def _display_socket(request: web.Request, can_touch: bool) -> web.StreamResponse:
+async def _display_socket(request: web.Request, can_touch: bool, can_act: bool = False) -> web.StreamResponse:
+    """Robot and preview socket. Only the robot (can_act) may approve, reject, type, focus or talk."""
     ws = web.WebSocketResponse(heartbeat=45)
     await ws.prepare(request)
     app = request.app
@@ -286,7 +287,7 @@ async def _display_socket(request: web.Request, can_touch: bool) -> web.StreamRe
     try:
         async for msg in ws:
             if msg.type == WSMsgType.BINARY:
-                if ptt and len(audio) < 60 * 2 * int(ptt.get("rate", 16000)):   # 60 s cap
+                if can_act and ptt and len(audio) < 60 * 2 * int(ptt.get("rate", 16000)):   # 60 s cap
                     audio.extend(msg.data)
                 continue
             if msg.type != WSMsgType.TEXT or not can_touch:
@@ -295,6 +296,8 @@ async def _display_socket(request: web.Request, can_touch: bool) -> web.StreamRe
             kind = data.get("type")
             if kind == "touch":
                 await handle_touch(app, data)
+            elif not can_act:
+                continue
             elif kind in ("act", "send", "focus"):
                 action = {"send": "send", "focus": "focus"}.get(kind, data.get("action", ""))
                 await route_action(app, ws, str(data.get("session")), action, str(data.get("text") or ""))
