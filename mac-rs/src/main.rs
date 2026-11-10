@@ -378,6 +378,7 @@ fn main() {
     log(&format!("watching {} as {host} -> {server}", w.dir.display()));
     let mut sent: HashMap<String, String> = HashMap::new();
     let mut last_beat = Instant::now();
+    let mut last_idle = Instant::now();
     let with_idle = |s: &Value| -> Value {
         let mut m = s.clone();
         if s["status"] == "waiting" {
@@ -400,6 +401,13 @@ fn main() {
             sent = now.iter().map(|(k, v)| (k.clone(), v.to_string())).collect();
             let sessions: Vec<Value> = now.values().map(&with_idle).collect();
             let _ = tx.send(json!({"type": "snapshot", "host": host, "sessions": sessions}).to_string());
+        }
+        // While a session waits, report keyboard/mouse idle time so the server knows if you walk away.
+        if last_idle.elapsed() >= Duration::from_secs(30) {
+            last_idle = Instant::now();
+            if sent.values().any(|t| t.contains("\"status\":\"waiting\"")) {
+                let _ = tx.send(json!({"type": "idle", "host": host, "idleSec": idle_secs()}).to_string());
+            }
         }
         let beat = last_beat.elapsed() >= Duration::from_secs(60);
         if changed || beat {

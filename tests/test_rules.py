@@ -31,17 +31,37 @@ def test_unknown_status_counts_as_working_and_daemons_are_hidden():
     assert d["count"] == 1 and d["rows"][0]["state"] == "working"
 
 
-def test_chime_only_when_away_repeats_then_stops_on_ack():
+def test_brief_chime_once_when_input_needed_while_present():
     m = Monitor()
-    m.apply("mac", {"type": "snapshot", "sessions": [sess(1, "waiting", idleSec=30)]}, now=NOW)
-    assert not m.display(now=NOW)["chime"], "present: silent nudge only"
-    m.apply("mac", {"type": "update", "sessions": [sess(1, "busy")]}, now=NOW)
-    m.apply("mac", {"type": "update", "sessions": [sess(1, "waiting", idleSec=300)]}, now=NOW)
-    assert m.display(now=NOW)["chime"]
+    m.apply("mac", {"type": "snapshot", "sessions": [sess(1, "waiting", idleSec=5)]}, now=NOW)
+    assert m.display(now=NOW)["chime"] == "short"
+    assert not m.display(now=NOW + 5)["chime"], "brief chime plays once per prompt"
+    assert not m.display(now=NOW + 300)["chime"], "no long chime while you're at the Mac"
+    m.apply("mac", {"type": "update", "sessions": [sess(1, "busy")]}, now=NOW + 301)
+    m.apply("mac", {"type": "update", "sessions": [sess(1, "waiting", idleSec=3)]}, now=NOW + 302)
+    assert m.display(now=NOW + 302)["chime"] == "short", "a new prompt chimes again"
+
+
+def test_long_chime_when_away_repeats_then_stops_on_ack():
+    m = Monitor()
+    m.apply("mac", {"type": "snapshot", "sessions": [sess(1, "waiting", idleSec=300)]}, now=NOW)
+    assert m.display(now=NOW)["chime"] == "long", "already away: long chime straight away"
     assert not m.display(now=NOW + 60)["chime"], "repeats only every 2 minutes"
-    assert m.display(now=NOW + 121)["chime"]
+    assert m.display(now=NOW + 121)["chime"] == "long"
     m.ack()
     assert not m.display(now=NOW + 300)["chime"]
+
+
+def test_walking_away_after_prompt_triggers_long_chime():
+    m = Monitor()
+    m.apply("mac", {"type": "snapshot", "sessions": [sess(1, "waiting", idleSec=2)]}, now=NOW)
+    assert m.display(now=NOW)["chime"] == "short"
+    m.apply("mac", {"type": "idle", "idleSec": 60}, now=NOW + 60)
+    assert not m.display(now=NOW + 60)["chime"]
+    m.apply("mac", {"type": "idle", "idleSec": 150}, now=NOW + 150)
+    assert m.display(now=NOW + 150)["chime"] == "long", "Mac idle report shows you left"
+    m.apply("mac", {"type": "idle", "idleSec": 1}, now=NOW + 400)
+    assert not m.display(now=NOW + 400)["chime"], "back at the Mac: no more long chimes"
 
 
 def test_quiet_hours_suppress_chime():
@@ -71,11 +91,11 @@ def test_snapshot_drops_sessions_that_closed_while_disconnected():
 def test_display_has_counts_ages_and_quiet_flag_for_robot_ui():
     m = Monitor()
     m.apply("mac", {"type": "snapshot", "sessions": [
-        sess(1, "waiting", since=(NOW - 90) * 1000), sess(2, "busy"), sess(3, "busy"),
-        sess(4, "idle"), sess(5, "idle")]}, now=NOW)
+        sess(1, "waiting", since=(NOW - 90) * 1000), sess(2, "busy"), sess(3, "busy")]
+        + [sess(i, "idle") for i in range(4, 14)]}, now=NOW)
     d = m.display(now=NOW, quiet_mode=True)
-    assert d["counts"] == {"needs_you": 1, "working": 2, "ready": 2}
-    assert len(d["rows"]) == 4 and d["more"] == 1
+    assert d["counts"] == {"needs_you": 1, "working": 2, "ready": 10}
+    assert len(d["rows"]) == 12 and d["more"] == 1, "robot list scrolls through up to 12 sessions"
     assert d["rows"][0]["ageSec"] == 90
     assert d["quiet"] is True
 
@@ -125,3 +145,11 @@ def test_preview_socket_cannot_approve_or_type():
             m = await asyncio.wait_for(mac.receive(), 2)
             assert _json.loads(m.data)["action"] == "approve", "robot actions still work"
     asyncio.run(run())
+
+
+def test_prompt_during_quiet_hours_does_not_chime_after_they_end():
+    m = Monitor(quiet_hours=(22, 8), tz_offset_min=0)
+    night = 1_800_000_000 - (1_800_000_000 % 86400) + 7 * 3600 + 3500   # 07:58 UTC
+    m.apply("mac", {"type": "snapshot", "sessions": [sess(1, "waiting", idleSec=5)]}, now=night)
+    assert not m.display(now=night)["chime"]
+    assert not m.display(now=night + 300)["chime"], "08:03: stale prompt stays silent"

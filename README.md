@@ -9,7 +9,9 @@ Shows every Claude Code session on your Macs on an M5Stack StackChan robot, and 
 - **Session screen** (tap a session): what it's asking, **Approve** (hold 1 s) / **Reject**, **Talk**
   (hold to speak a prompt, confirm, then it's typed into the session), **Mac** (bring its tab to front).
   Actions work for sessions running in Ghostty; other sessions are view-only.
-- **Chime** when a session needs you and the Mac has been idle for 2+ minutes (not during quiet hours).
+- **Chimes**: a brief chime when a session needs your input; a longer one, repeating every 2 min (up to 5×,
+  tap the head to stop), when that Mac has had no keyboard/mouse activity for 2+ min. Silent in quiet hours.
+- **List stripes**: state colour for Ghostty sessions, blue for sessions not in Ghostty (view only).
 - **Head panel**: tap = acknowledge, long press = quiet mode.
 
 No Claude Code config is changed: the Mac monitor only reads `~/.claude/sessions/*.json` (and the tail of a

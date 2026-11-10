@@ -43,6 +43,7 @@ static const uint32_t C_NEEDS   = 0xFF9F0A;
 static const uint32_t C_WORKING = 0xFFD60A;
 static const uint32_t C_READY   = 0x30D158;
 static const uint32_t C_OFFLINE = 0x636366;
+static const uint32_t C_NOT_GHOSTTY = 0x0A84FF;   // list stripe: session not in Ghostty (view only)
 
 static uint32_t state_color(const std::string& s)
 {
@@ -88,7 +89,7 @@ static void ws_task(void*)
         if (ws) {
             std::string auth = std::string("Bearer ") + CC_MONITOR_TOKEN;
             ws->SetHeader("Authorization", auth.c_str());
-            ws->SetReceiveBufferSize(4096);
+            ws->SetReceiveBufferSize(8192);
             ws->OnData([](const char* data, size_t len, bool binary) {
                 if (binary) return;
                 std::lock_guard<std::mutex> lock(_rx_mutex);
@@ -403,11 +404,59 @@ static void show(lv_obj_t* o, bool on)
     else lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
 }
 
+// ------------------------------------------------------------------ chimes (synthesised)
+// The firmware's Ogg player lives in the voice assistant's AudioService, which isn't started in this
+// mode (calling it crashes), so chimes are generated here and written straight to the speaker.
+
+static std::atomic<bool> _chime_busy{false};
+
+static void chime_task(void* arg)
+{
+    const bool longer = arg != nullptr;
+    auto codec        = Board::GetInstance().GetAudioCodec();
+    const int rate    = codec->output_sample_rate();
+    const int ch      = std::max(1, codec->output_channels());
+    codec->EnableOutput(true);
+    // (frequency Hz, length ms): brief = two-note "ding-dong"; longer = rising four-note phrase, twice.
+    static const float brief[][2]  = {{1318.5f, 140}, {1760.0f, 420}};
+    static const float phrase[][2] = {{1046.5f, 170}, {1318.5f, 170}, {1568.0f, 170}, {2093.0f, 520},
+                                      {0, 220},
+                                      {1046.5f, 170}, {1318.5f, 170}, {1568.0f, 170}, {2093.0f, 700}};
+    const float (*notes)[2] = longer ? phrase : brief;
+    const int count         = longer ? 9 : 2;
+    std::vector<int16_t> buf(rate / 50 * ch);   // 20 ms chunks
+    for (int n = 0; n < count; n++) {
+        const float f = notes[n][0];
+        const int total = (int)(notes[n][1] * rate / 1000);
+        for (int done = 0; done < total;) {
+            int k = std::min<int>(rate / 50, total - done);
+            for (int i = 0; i < k; i++) {
+                float t   = (float)(done + i) / rate;
+                float env = std::min(1.0f, t * 200.0f) * expf(-t * (longer ? 5.0f : 6.0f));   // 5 ms attack, bell decay
+                float s   = f > 0 ? env * (0.75f * sinf(2 * 3.14159f * f * t) + 0.25f * sinf(4 * 3.14159f * f * t)) : 0;
+                for (int c2 = 0; c2 < ch; c2++) buf[i * ch + c2] = (int16_t)(s * 9000);
+            }
+            std::vector<int16_t> out(buf.begin(), buf.begin() + k * ch);
+            codec->OutputData(out);
+            done += k;
+        }
+    }
+    _chime_busy = false;
+    vTaskDelete(nullptr);
+}
+
+static void play_chime(bool longer)
+{
+    if (_chime_busy.exchange(true)) return;
+    xTaskCreate(chime_task, "cc_chime", 4096, longer ? (void*)1 : nullptr, 4, nullptr);
+}
+
 // ------------------------------------------------------------------ app lifecycle
 
 static std::atomic<bool> _tap_flag{false};
 static std::atomic<bool> _quit_flag{false};
-static std::atomic<int> _open_flag{0};     // 1..4 = sheet row, 100 = row shown on the bottom card
+static std::atomic<int> _open_flag{0};
+static std::atomic<bool> _scrolled_flag{false};   // list scrolled: keep the sheet open     // 1..4 = sheet row, 100 = row shown on the bottom card
 static size_t _touch_conn = 0;
 static std::atomic<uint32_t> _press_ms{0};
 
@@ -545,10 +594,26 @@ void AppCcMonitor::buildUi()
     lv_obj_center(x);
     lv_obj_add_event_cb(quit, [](lv_event_t*) { _quit_flag = true; }, LV_EVENT_CLICKED, nullptr);
 
-    for (int i = 0; i < 4; i++) {
-        lv_obj_t* c = box(_sheet, C_SURFACE, LV_OPA_COVER, 12);
+    // Scrollable session list (swipe up/down). Visible area ends at the screen bottom (sheet sits at y=24).
+    _sheet_list = box(_sheet, C_SHEET, LV_OPA_TRANSP, 0);
+    lv_obj_set_pos(_sheet_list, 0, 52);
+    lv_obj_set_size(_sheet_list, 320, 240 - 24 - 52);
+    lv_obj_add_flag(_sheet_list, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(_sheet_list, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_scroll_dir(_sheet_list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(_sheet_list, LV_SCROLLBAR_MODE_ACTIVE);
+    lv_obj_set_style_bg_color(_sheet_list, lv_color_hex(0x5A5A5E), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(_sheet_list, LV_OPA_COVER, LV_PART_SCROLLBAR);
+    lv_obj_set_style_width(_sheet_list, 3, LV_PART_SCROLLBAR);
+    lv_obj_set_flex_flow(_sheet_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(_sheet_list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(_sheet_list, 4, 0);
+    lv_obj_set_style_pad_bottom(_sheet_list, 10, 0);
+    lv_obj_add_event_cb(_sheet_list, [](lv_event_t*) { _scrolled_flag = true; }, LV_EVENT_SCROLL, nullptr);
+
+    for (int i = 0; i < 12; i++) {
+        lv_obj_t* c = box(_sheet_list, C_SURFACE, LV_OPA_COVER, 12);
         lv_obj_set_size(c, 296, 34);
-        lv_obj_set_pos(c, 12, 54 + i * 38);
         _sheet_cards[i] = c;
         _sheet_bars[i]  = box(c, C_OFFLINE, LV_OPA_COVER, 2);
         lv_obj_set_size(_sheet_bars[i], 4, 18);
@@ -567,9 +632,8 @@ void AppCcMonitor::buildUi()
         lv_obj_add_event_cb(c, [](lv_event_t* e) { _open_flag = 1 + (int)(intptr_t)lv_event_get_user_data(e); },
                             LV_EVENT_CLICKED, (void*)(intptr_t)i);
     }
+    _sheet_more = text(_sheet_list, &lv_font_montserrat_14, C_MUTED);
     build_session_screen(scr);
-    _sheet_more = text(_sheet, &lv_font_montserrat_14, C_MUTED);
-    lv_obj_set_pos(_sheet_more, 18, 208);
 }
 
 // ------------------------------------------------------------------ state -> screen
@@ -607,8 +671,9 @@ void AppCcMonitor::applyDisplay(const std::string& body)
     renderChip();
     renderTicker(false);
     renderSheet();
-    if (doc["chime"] | false) {
-        hal_bridge::app_play_sound(OGG_NEW_NOTIFICATION);
+    std::string chime = doc["chime"].is<bool>() ? (doc["chime"].as<bool>() ? "long" : "") : (doc["chime"] | "");
+    if (!chime.empty()) {
+        play_chime(chime == "long");
     }
 }
 
@@ -693,10 +758,10 @@ void AppCcMonitor::renderTicker(bool advance)
         title = "All quiet";
         sub   = "No Claude sessions running";
     } else {
-        // Cycle through the sessions that need you if any, otherwise through all of them.
+        // Only sessions that need you (they sort first); otherwise the card is hidden.
         int pool = 0;
         while (pool < (int)_rows.size() && _rows[pool].state == "needs_you") pool++;
-        if (pool == 0) pool = _rows.size();
+        if (pool == 0) pool = 1;   // unused: card hidden below
         if (advance) _ticker_index++;
         _ticker_index %= pool;
         const Row& r = _rows[_ticker_index];
@@ -704,6 +769,11 @@ void AppCcMonitor::renderTicker(bool advance)
         sub          = r.detail + (r.ghostty ? "" : "  ·  not in Ghostty");
         age          = fmt_age(r.age_sec + (GetHAL().millis() - _rx_ms) / 1000);
         bar = sub_color = state_color(r.state);
+    }
+    bool show_card = !_connected || _n_needs > 0;
+    if (show_card != !lv_obj_has_flag(_card, LV_OBJ_FLAG_HIDDEN)) {
+        show(_card, show_card);
+        if (show_card) fade_in(_card, 250);
     }
     lv_label_set_text(_card_title, title.c_str());
     lv_label_set_text(_card_sub, sub.c_str());
@@ -721,12 +791,12 @@ void AppCcMonitor::renderTicker(bool advance)
 void AppCcMonitor::renderSheet()
 {
     lv_label_set_text_fmt(_sheet_count, "%d", _count);
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 12; i++) {
         if (i < (int)_rows.size()) {
             const Row& r = _rows[i];
             uint32_t c   = state_color(r.state);
             lv_obj_remove_flag(_sheet_cards[i], LV_OBJ_FLAG_HIDDEN);
-            lv_obj_set_style_bg_color(_sheet_bars[i], lv_color_hex(c), 0);
+            lv_obj_set_style_bg_color(_sheet_bars[i], lv_color_hex(r.ghostty ? c : C_NOT_GHOSTTY), 0);
             lv_label_set_text(_sheet_names[i], r.name.c_str());
             std::string d = r.detail + "  " + fmt_age(r.age_sec + (GetHAL().millis() - _rx_ms) / 1000);
             lv_label_set_text(_sheet_details[i], d.c_str());
@@ -748,6 +818,7 @@ void AppCcMonitor::showSheet(bool show)
 {
     _sheet_open      = show;
     _sheet_opened_ms = GetHAL().millis();
+    if (show) lv_obj_scroll_to_y(_sheet_list, 0, LV_ANIM_OFF);
     lv_anim_delete(_sheet, anim_y_cb);
     lv_anim_t a;
     lv_anim_init(&a);
@@ -818,6 +889,7 @@ void AppCcMonitor::onRunning()
     if (_tap_flag.exchange(false)) {
         showSheet(!_sheet_open);
     }
+    if (_scrolled_flag.exchange(false)) _sheet_opened_ms = now;
     if (_sheet_open && now - _sheet_opened_ms > 12000) {
         showSheet(false);
     }
@@ -916,7 +988,7 @@ void AppCcMonitor::renderSession()
     const Row* r = nullptr;
     for (auto& x : _rows) if (x.session == _open_session) r = &x;
     if (!r) {
-        lv_label_set_text(_ss_status, "Session ended or not in the top 4");
+        lv_label_set_text(_ss_status, "Session ended");
         lv_obj_set_style_bg_color(_ss_dot, lv_color_hex(C_OFFLINE), 0);
         for (auto o : {_ss_reject, _ss_approve, _ss_talk, _ss_focus, _ss_ask_box}) show(o, false);
         return;

@@ -61,10 +61,11 @@ private:
     lv_obj_t* _sheet = nullptr;
     lv_obj_t* _sheet_count = nullptr;
     lv_obj_t* _sheet_more = nullptr;
-    lv_obj_t* _sheet_cards[4]{};
-    lv_obj_t* _sheet_bars[4]{};
-    lv_obj_t* _sheet_names[4]{};
-    lv_obj_t* _sheet_details[4]{};
+    lv_obj_t* _sheet_list = nullptr;
+    lv_obj_t* _sheet_cards[12]{};
+    lv_obj_t* _sheet_bars[12]{};
+    lv_obj_t* _sheet_names[12]{};
+    lv_obj_t* _sheet_details[12]{};
     bool _sheet_open = false;
     uint32_t _sheet_opened_ms = 0;
     int _ticker_index = 0;

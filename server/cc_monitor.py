@@ -26,13 +26,13 @@ from aiohttp import WSMsgType, web
 
 log = logging.getLogger("cc-monitor")
 
-AWAY_IDLE_S = 120          # Mac idle longer than this when a session starts waiting = you are away
+AWAY_IDLE_S = 120          # Mac idle (no keyboard/mouse) longer than this = you are away
 CHIME_REPEAT_S = 120
 CHIME_MAX = 5
 JUST_FINISHED_S = 5
 HEARTBEAT_TIMEOUT_S = 180  # three missed 60 s heartbeats
 OFFLINE_DROP_S = 300
-MAX_ROWS = 4
+MAX_ROWS = 12
 
 WAITING_TEXT = {
     "input needed": "needs your input",
@@ -63,7 +63,7 @@ class Session:
     acked: bool = False
     chimes: int = 0
     last_chime: float = 0.0
-    away: bool = False
+    short_chimed: bool = False         # brief "input needed" chime played for this prompt
 
 
 @dataclass
@@ -71,6 +71,7 @@ class Mac:
     host: str
     last_seen: float
     ws: web.WebSocketResponse | None = None
+    idle_sec: int = 0                  # last reported keyboard/mouse idle time (cc-watch reports it while waiting)
 
 
 @dataclass
@@ -99,6 +100,8 @@ class Monitor:
                 self._upsert(host, s, now)
         elif kind == "gone":
             self.sessions.pop((host, str(msg.get("id"))), None)
+        elif kind == "idle":
+            mac.idle_sec = int(msg.get("idleSec") or 0)
         elif kind == "heartbeat":
             live = set(msg.get("ids", []))
             for key in [k for k in self.sessions if k[0] == host and k[1] not in live]:
@@ -108,16 +111,15 @@ class Monitor:
         if not s.get("id") or s.get("kind") in ("daemon", "daemon-worker"):
             return
         key = (host, s["id"])
+        if s.get("idleSec") is not None:
+            self.macs[host].idle_sec = int(s["idleSec"])
         new_state = state_of(s.get("status"))
         since = (s.get("since") or now * 1000) / 1000
         old = self.sessions.get(key)
         if old is None or old.state != new_state:
             if old is not None and old.state == "working" and new_state == "ready":
                 self.finished_at = now
-            sess = Session(host, s["id"], s, new_state, since)
-            if new_state == "needs_you":
-                sess.away = (s.get("idleSec") or 0) > AWAY_IDLE_S
-            self.sessions[key] = sess
+            self.sessions[key] = Session(host, s["id"], s, new_state, since)
         else:
             old.data = s
 
@@ -155,14 +157,28 @@ class Monitor:
             mood = "just_finished" if now - self.finished_at < JUST_FINISHED_S else "all_done"
         else:
             mood = "none"
-        chime = False
-        if not quiet_mode and not self._quiet(now):
+        # "short": once when a session starts needing input. "long": while you're away from that Mac
+        # (no keyboard/mouse for AWAY_IDLE_S), repeating every CHIME_REPEAT_S, up to CHIME_MAX, until acked.
+        chime = ""
+        if quiet_mode or self._quiet(now):
+            for s in rows:   # a prompt that arrives while quiet doesn't chime later
+                if s.state == "needs_you":
+                    s.short_chimed = True
+        else:
             for s in rows:
-                if (s.state == "needs_you" and s.away and not s.acked and s.chimes < CHIME_MAX
+                if s.state != "needs_you":
+                    continue
+                mac = self.macs.get(s.host)
+                away = mac is not None and mac.idle_sec > AWAY_IDLE_S
+                if (away and not s.acked and s.chimes < CHIME_MAX
                         and now - s.last_chime >= CHIME_REPEAT_S):
-                    chime = True
+                    chime = "long"
                     s.chimes += 1
                     s.last_chime = now
+                    s.short_chimed = True
+                elif not s.short_chimed:
+                    chime = chime or "short"
+                    s.short_chimed = True
         led_mood = "all_done" if mood == "just_finished" else mood
         return {
             "type": "display",
