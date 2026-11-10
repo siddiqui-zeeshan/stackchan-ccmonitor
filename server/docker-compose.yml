@@ -3,5 +3,6 @@ services:
     build: .
     env_file: .env.local
     ports:
-      - "8810:8810"
+      # Set BIND=127.0.0.1 (e.g. in server/.env) when a tunnel/reverse proxy on the same host fronts it.
+      - "${BIND:-0.0.0.0}:8810:8810"
     restart: unless-stopped
