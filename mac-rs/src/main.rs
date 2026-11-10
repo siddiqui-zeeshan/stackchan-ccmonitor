@@ -37,25 +37,60 @@ fn alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 || *libc::__error() != libc::ESRCH }
 }
 
-/// pid -> (Ghostty terminal id, terminal title)
-fn ghostty_terminals() -> HashMap<i64, (String, String)> {
+#[derive(Clone, Debug)]
+struct Term {
+    id: String,
+    pid: i64,     // Ghostty reports the terminal's foreground process
+    tty: String,  // e.g. /dev/ttys003
+    name: String, // tab title
+}
+
+/// All Ghostty terminals, or an error (Ghostty missing/too old, or Automation permission not granted).
+fn ghostty_terminals() -> Result<Vec<Term>, String> {
     // "tab" inside Ghostty's tell block means Ghostty's tab class, so define the separator first.
     let script = "set sep to character id 9\nset nl to character id 10\n\
         if application \"Ghostty\" is running then\ntell application \"Ghostty\"\nset out to \"\"\n\
-        repeat with t in terminals\nset out to out & (id of t) & sep & (pid of t) & sep & (name of t) & nl\n\
+        repeat with t in terminals\nset out to out & (id of t) & sep & (pid of t) & sep & (tty of t) & sep & (name of t) & nl\n\
         end repeat\nreturn out\nend tell\nend if\nreturn \"\"";
-    let mut map = HashMap::new();
-    if let Ok(out) = Command::new("/usr/bin/osascript").arg("-e").arg(script).output() {
+    let out = Command::new("/usr/bin/osascript").arg("-e").arg(script).output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    let mut v = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let p: Vec<&str> = line.splitn(4, '\t').collect();
+        if p.len() == 4 {
+            v.push(Term { id: p[0].into(), pid: p[1].trim().parse().unwrap_or(-1), tty: p[2].trim().into(), name: p[3].into() });
+        }
+    }
+    Ok(v)
+}
+
+/// The tab a Claude process runs in: by foreground pid, else by controlling tty.
+fn match_terminal<'a>(terms: &'a [Term], pid: i64, tty: &str) -> Option<&'a Term> {
+    terms.iter().find(|t| t.pid == pid).or_else(|| {
+        if tty.is_empty() { return None; }
+        let short = tty.trim_start_matches("/dev/");
+        terms.iter().find(|t| t.tty.trim_start_matches("/dev/") == short)
+    })
+}
+
+/// pid -> controlling tty name (e.g. "ttys003"), one `ps` call for all pids.
+fn ttys_of(pids: &[i64]) -> HashMap<i64, String> {
+    let mut m = HashMap::new();
+    if pids.is_empty() { return m; }
+    let list: Vec<String> = pids.iter().map(|p| p.to_string()).collect();
+    if let Ok(out) = Command::new("/bin/ps").args(["-o", "pid=,tty=", "-p", &list.join(",")]).output() {
         for line in String::from_utf8_lossy(&out.stdout).lines() {
-            let p: Vec<&str> = line.splitn(3, '\t').collect();
-            if p.len() == 3 {
-                if let Ok(pid) = p[1].trim().parse::<i64>() {
-                    map.insert(pid, (p[0].to_string(), p[2].to_string()));
+            let mut it = line.split_whitespace();
+            if let (Some(p), Some(t)) = (it.next(), it.next()) {
+                if let Ok(p) = p.parse::<i64>() {
+                    if t != "??" { m.insert(p, t.to_string()); }
                 }
             }
         }
     }
-    map
+    m
 }
 
 fn focus(terminal: &str) {
@@ -152,7 +187,9 @@ fn do_action(dir: &Path, m: &Value) -> Result<(), String> {
     }
     let live = live.ok_or("session ended")?;
     let pid = live["pid"].as_i64().unwrap_or(-1);
-    if !ghostty_terminals().get(&pid).map(|(id, _)| id == terminal).unwrap_or(false) {
+    let terms = ghostty_terminals()?;
+    let tty = ttys_of(&[pid]).remove(&pid).unwrap_or_default();
+    if match_terminal(&terms, pid, &tty).map(|t| t.id != terminal).unwrap_or(true) {
         return Err("terminal changed".into());
     }
     match action {
@@ -179,15 +216,19 @@ struct Watch {
     dir: PathBuf,
     kq: i32,
     files: HashMap<PathBuf, i32>,
-    ghostty: HashMap<i64, (String, String)>,
+    ghostty: HashMap<i64, (String, String)>,   // claude pid -> (terminal id, tab title)
     use_ghostty: bool,
+    known_pids: Vec<i64>,                      // pids seen at the last Ghostty lookup
+    last_lookup: Option<Instant>,
+    last_error: String,
 }
 
 impl Watch {
     fn new(dir: PathBuf, use_ghostty: bool) -> Self {
         let _ = std::fs::create_dir_all(&dir);
         let kq = unsafe { libc::kqueue() };
-        let w = Watch { dir, kq, files: HashMap::new(), ghostty: HashMap::new(), use_ghostty };
+        let w = Watch { dir, kq, files: HashMap::new(), ghostty: HashMap::new(), use_ghostty,
+                        known_pids: Vec::new(), last_lookup: None, last_error: String::new() };
         let fd = w.open(&w.dir.clone());
         if fd < 0 {
             log("cannot open ~/.claude/sessions");
@@ -252,8 +293,8 @@ impl Watch {
                     }
                 }
                 seen.push(path);
-                if self.use_ghostty && !self.ghostty.contains_key(&pid) {
-                    need_ghostty = true;
+                if self.use_ghostty && !self.known_pids.contains(&pid) {
+                    need_ghostty = true;   // a session we haven't looked up yet
                 }
                 parsed.push(j);
             }
@@ -265,8 +306,30 @@ impl Watch {
                 unsafe { libc::close(fd) };
             }
         }
-        if need_ghostty {
-            self.ghostty = ghostty_terminals();
+        // Look up tabs when a new session appears; otherwise refresh at most every 30 s (tab titles,
+        // sessions that moved), so sessions outside Ghostty don't cost an osascript run per file change.
+        let stale = self.last_lookup.map(|t| t.elapsed() >= Duration::from_secs(30)).unwrap_or(true);
+        if self.use_ghostty && (need_ghostty || stale) {
+            let pids: Vec<i64> = parsed.iter().filter_map(|j| j["pid"].as_i64()).collect();
+            self.last_lookup = Some(Instant::now());
+            self.known_pids = pids.clone();
+            match ghostty_terminals() {
+                Ok(terms) => {
+                    let ttys = ttys_of(&pids);
+                    self.ghostty = pids.iter().filter_map(|p| {
+                        match_terminal(&terms, *p, ttys.get(p).map(|s| s.as_str()).unwrap_or(""))
+                            .map(|t| (*p, (t.id.clone(), t.name.clone())))
+                    }).collect();
+                    if !self.last_error.is_empty() { log("ghostty lookup working again"); }
+                    self.last_error.clear();
+                }
+                Err(e) => {
+                    if e != self.last_error {
+                        log(&format!("ghostty lookup failed: {e} (System Settings > Privacy & Security > Automation: allow cc-watch to control Ghostty)"));
+                    }
+                    self.last_error = e;
+                }
+            }
         }
         let mut out = HashMap::new();
         for j in parsed {
