@@ -4,7 +4,7 @@ Shows every Claude Code session on your Macs on an M5Stack StackChan robot, and 
 
 - **Face** follows your sessions: puzzled with a sweat drop when one needs you, calm while working,
   happy with hearts when one finishes, sleepy when there are none.
-- **LEDs**: flashing orange = needs you, breathing yellow = working, green = all done, dim white = offline.
+- **LEDs**: flashing red = needs you, breathing yellow = working, green = all done, dim white = offline.
 - **Screen**: status chip, a bottom card cycling through sessions, a slide-up session list (tap the face).
 - **Session screen** (tap a session): what it's asking, **Approve** (hold 1 s) / **Reject**, **Talk**
   (hold to speak a prompt, confirm, then it's typed into the session), **Mac** (bring its tab to front).

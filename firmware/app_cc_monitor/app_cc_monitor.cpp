@@ -766,7 +766,7 @@ void AppCcMonitor::updateLeds()
     _led_tick = now;
     uint8_t r = 0, g = 0, b = 0;
     if (_leds == "flash") {
-        if ((now / 250) % 2 == 0) { r = 168; g = 70; }                       // orange, twice a second
+        if ((now / 250) % 2 == 0) { r = 200; }                               // red, twice a second
     } else if (_leds == "yellow_breathe") {
         float k = 0.5f - 0.5f * cosf((now % 3000) / 3000.0f * 2.0f * 3.14159f);   // 3 s breath
         k       = 0.08f + 0.92f * k;
