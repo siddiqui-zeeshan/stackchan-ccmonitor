@@ -78,8 +78,8 @@ fn idle_secs() -> u64 {
     0
 }
 
-/// One line describing what a waiting session is asking, from the tail of its transcript.
-fn ask_summary(cwd: &str, sid: &str) -> String {
+/// Short text for the robot's session screen, read from the tail of the session's transcript.
+fn ask_summary(cwd: &str, sid: &str, status: &str) -> String {
     let enc: String = cwd.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect();
     let path = home().join(".claude/projects").join(enc).join(format!("{sid}.jsonl"));
     let Ok(mut f) = std::fs::File::open(&path) else { return String::new() };
@@ -88,29 +88,41 @@ fn ask_summary(cwd: &str, sid: &str) -> String {
     let _ = f.seek(SeekFrom::Start(len.saturating_sub(32 * 1024)));
     let mut buf = Vec::new();
     let _ = f.read_to_end(&mut buf);
-    let text = String::from_utf8_lossy(&buf);
+    summarize_transcript(&String::from_utf8_lossy(&buf), status)
+}
+
+/// waiting: the pending request (tool call, else question). busy: the latest tool call or text.
+/// idle: the end of Claude's last reply (usually its conclusion or a question to you).
+fn summarize_transcript(text: &str, status: &str) -> String {
+    let squash = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     for line in text.lines().rev() {
         let Ok(j) = serde_json::from_str::<Value>(line) else { continue };
         if j["type"] != "assistant" { continue; }
         let Some(parts) = j["message"]["content"].as_array() else { continue };
-        let mut out = String::new();
+        let mut tool = String::new();
+        let mut said = String::new();
         for p in parts.iter().rev() {
-            if p["type"] == "tool_use" {
-                let name = p["name"].as_str().unwrap_or("tool");
+            if p["type"] == "tool_use" && tool.is_empty() {
                 let inp = &p["input"];
                 let arg = ["command", "file_path", "url", "pattern", "description", "prompt"]
                     .iter().find_map(|k| inp[*k].as_str()).unwrap_or("");
-                out = format!("{name}: {arg}");
-                break;
+                tool = format!("{}: {}", p["name"].as_str().unwrap_or("tool"), arg);
             }
-            if p["type"] == "text" && out.is_empty() {
-                out = p["text"].as_str().unwrap_or("").to_string();
+            if p["type"] == "text" && said.is_empty() {
+                said = p["text"].as_str().unwrap_or("").to_string();
             }
         }
-        if out.is_empty() { continue; }
-        let one: String = out.split_whitespace().collect::<Vec<_>>().join(" ");
-        let chars: Vec<char> = one.chars().collect();
-        return if chars.len() > 140 { chars[..140].iter().collect::<String>() + "…" } else { one };
+        let chars = |s: String| -> Vec<char> { squash(&s).chars().collect() };
+        if status == "idle" {
+            if said.trim().is_empty() { continue; }        // idle: skip tool-only lines, find the reply
+            let c = chars(said);
+            return if c.len() > 220 { format!("…{}", c[c.len() - 220..].iter().collect::<String>()) }
+                   else { c.iter().collect() };
+        }
+        let pick = if !tool.is_empty() { tool } else { said };
+        if pick.trim().is_empty() { continue; }
+        let c = chars(pick);
+        return if c.len() > 140 { c[..140].iter().collect::<String>() + "…" } else { c.iter().collect() };
     }
     String::new()
 }
@@ -270,8 +282,10 @@ impl Watch {
             if let Some(w) = j["waitingFor"].as_str() {
                 s.insert("waitingFor".into(), json!(w));
             }
-            if j["status"] == "waiting" {
-                s.insert("ask".into(), json!(ask_summary(cwd, &sid)));
+            let status = j["status"].as_str().unwrap_or("");
+            let ask = ask_summary(cwd, &sid, status);
+            if !ask.is_empty() {
+                s.insert("ask".into(), json!(ask));
             }
             if let Some((tid, title)) = self.ghostty.get(&j["pid"].as_i64().unwrap_or(-1)) {
                 s.insert("terminal".into(), json!(format!("ghostty:{tid}")));
@@ -412,5 +426,41 @@ fn main() {
                 let _ = tx.send(json!({"type": "heartbeat", "host": host, "ids": ids}).to_string());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::summarize_transcript;
+
+    const T: &str = concat!(
+        r#"{"type":"user","message":{"content":"build it"}}"#, "\n",
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo build --release"}}]}}"#, "\n",
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#, "\n",
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Build finished.\n\nShould I also run the tests?"}]}}"#, "\n",
+    );
+
+    #[test]
+    fn ready_session_shows_end_of_last_reply() {
+        assert_eq!(summarize_transcript(T, "idle"), "Build finished. Should I also run the tests?");
+    }
+
+    #[test]
+    fn long_reply_keeps_the_ending() {
+        let long = format!(r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{}THE END"}}]}}}}"#, "x".repeat(500));
+        let s = summarize_transcript(&long, "idle");
+        assert!(s.starts_with('…') && s.ends_with("THE END") && s.chars().count() <= 221, "{s}");
+    }
+
+    #[test]
+    fn working_session_shows_latest_tool_call() {
+        let t = T.lines().take(2).collect::<Vec<_>>().join("\n");
+        assert_eq!(summarize_transcript(&t, "busy"), "Bash: cargo build --release");
+    }
+
+    #[test]
+    fn waiting_session_shows_pending_request() {
+        let t = T.lines().take(2).collect::<Vec<_>>().join("\n");
+        assert_eq!(summarize_transcript(&t, "waiting"), "Bash: cargo build --release");
     }
 }
