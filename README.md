@@ -32,7 +32,7 @@ Mac(s): cc-watch ──ws──▶ server: cc-monitor ◀──ws── robot: C
 
 ### 1. Server (run it on an always-on machine; any host reachable by the Macs and the robot)
 ```sh
-git clone git@github.com:siddiqui-zeeshan/stackchan-ccmonitor.git && cd stackchan-ccmonitor/server
+git clone https://github.com/siddiqui-zeeshan/stackchan-ccmonitor.git && cd stackchan-ccmonitor/server
 cp .env.example .env.local        # then fill it in (see comments; generate tokens as shown there)
 chmod 600 .env.local
 ```
@@ -53,7 +53,7 @@ Tailscale Funnel, Cloudflare Tunnel, …) and use `wss://` URLs below.
 ### 2. Each Mac
 ```sh
 brew install rust                 # once; or skip it to build the Swift version instead
-git clone git@github.com:siddiqui-zeeshan/stackchan-ccmonitor.git && cd stackchan-ccmonitor/mac
+git clone https://github.com/siddiqui-zeeshan/stackchan-ccmonitor.git && cd stackchan-ccmonitor/mac
 ./install.sh ws://<server-host>:8810/cc/mac <one of MAC_TOKENS>
 ```
 This builds `cc-watch`, installs it to `~/Applications/cc-watch`, writes `~/.config/cc-watch/config.json`, and
