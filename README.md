@@ -2,17 +2,32 @@
 
 Shows every Claude Code session on your Macs on an M5Stack StackChan robot, and lets you answer them from it.
 
-- **Face** follows your sessions: puzzled with a sweat drop when one needs you, calm while working,
-  happy with hearts when one finishes, sleepy when there are none.
-- **LEDs**: flashing red = needs you, breathing yellow = working, green = all done, dim white = offline.
-- **Screen**: status chip, a bottom card cycling through sessions, a slide-up session list (tap the face).
+- **Screen**: the whole screen takes the mood's colour, with a pixel face, one big number (how many sessions
+  are in the most urgent state) and one plain sentence about the session that matters most, for example
+  "fast-agent-prod wants to run / npm run deploy:staging". With several such sessions the sentence moves to the
+  next one every 4 s. Tap the sentence to open that session; tap anywhere else for the session list.
+
+  | Mood | When | Screen and face | Side lights |
+  |---|---|---|---|
+  | Working | nothing needs you, at least one session is busy | rainbow stripes drifting, eyes glancing | slow colour cycle |
+  | Needs you | a session just asked for your answer | red, sweating | flashing red |
+  | Still waiting | it has waited 2 min, or you are away from that Mac | orange, gritted teeth | flashing orange |
+  | Just finished | a few seconds after a session finishes | yellow smiley with a heart | green |
+  | All ready | every session waits for a new prompt | green smiley | green |
+  | Nothing running | no Claude sessions | dim blue, asleep | off |
+  | Offline | the robot can't reach the server | grey, crossed-out eyes | dim white |
+
+- **Head**: tilted up towards you in every mood except nothing running and offline, where it looks down. A
+  light nod whenever the mood changes, and small random "thinking" movements while working (none in quiet
+  mode or quiet hours, and none while you hold Talk).
+- **Session list** (tap the screen): up to 12 sessions, most urgent first, each with a small face in its
+  state's colour. "view only" marks a session that isn't running in Ghostty. The X leaves the app.
 - **Session screen** (tap a session): what it's asking, **Approve** (hold 1 s) / **Reject**, **Talk**
   (hold to speak a prompt, confirm, then it's typed into the session), **Mac** (bring its tab to front).
   Actions work for sessions running in Ghostty; other sessions are view-only.
 - **Chimes**: a brief chime when a session needs your input; a longer one, repeating every 2 min (up to 5×,
   tap the head to stop), when that Mac has had no keyboard/mouse activity for 2+ min. Silent in quiet hours.
-- **List stripes**: state colour for Ghostty sessions, blue for sessions not in Ghostty (view only).
-- **Head panel**: tap = acknowledge, long press = quiet mode.
+- **Head panel**: tap = acknowledge, long press = quiet mode (a mute mark shows top-left).
 
 No Claude Code config is changed: the Mac monitor only reads `~/.claude/sessions/*.json` (and the tail of a
 waiting session's transcript).
@@ -26,8 +41,8 @@ Mac(s): cc-watch ──ws──▶ server: cc-monitor ◀──ws── robot: C
 |---|---|
 | `mac-rs/` | Mac monitor (Rust, default, ~1.8 MB RAM) |
 | `mac/` | Swift version of the same monitor (~19 MB RAM) and `install.sh` |
-| `server/` | Server: merges Macs, decides mood/LEDs/chime, routes actions, transcribes Talk (Gemini) |
-| `firmware/` | Robot app source, patches on top of official StackChan v1.6.2, `build.sh` |
+| `server/` | Server: merges Macs, decides mood/LEDs/chime and the sentence wording, routes actions, transcribes Talk (Gemini) |
+| `firmware/` | Robot app source (draws its own pixel faces), patches on top of official StackChan v1.6.2, `build.sh` |
 | `tests/` | Server rule tests (`pytest tests`) |
 
 Mac monitor tests live in `mac-rs/src/main.rs` (`cd mac-rs && cargo test`): transcript summaries, Ghostty
@@ -87,6 +102,22 @@ The patches also turn off the firmware's automatic self-update (so the robot doe
 raise the audio-decode task priority (fixes voice stutter). To go back to stock, flash the official firmware.
 
 ## Notes
+- The robot only draws what the server sends, so the rules live in `server/cc_monitor.py` and are covered by
+  `tests/`: which mood applies, when "needs you" becomes "still waiting" (`STILL_WAITING_S`, or the Mac idle
+  longer than `AWAY_IDLE_S`), the big number, and the sentence wording per tool (`VERBS`, `sentence()`).
+- Faces, colours and head movement are in `firmware/app_cc_monitor/app_cc_monitor.cpp`: `look_of()` (colours),
+  `pix::face()` (one face per mood, drawn as 4 px cells into an LVGL canvas), `setMood()` / `updateHead()`
+  (head). The firmware has no automated tests; check changes by building and running them on the robot.
+  After the first `build.sh` run, a rebuild is quicker with the app files copied into
+  `firmware/.work/StackChan/firmware/main/apps/app_cc_monitor/` and `idf.py build` run in the same Docker image.
+- The rainbow screen redraws the whole display about 11 times a second; every other face only redraws the
+  small area that moved.
+- The app logs each mood change, nod and "thinking" move with the head's position (`[CC-MONITOR]` lines on
+  the robot's USB serial console). If the head doesn't move and the log shows
+  `[ScsServo] ... invalid current pos: -1` after every move, the servos aren't replying: turn the robot fully
+  off and on (a USB reset restarts the main chip but not the servos).
+- Browser preview (`/cc/preview`): a rough view of the same state (mood colour, number, sentence, rows). It
+  does not draw the pixel faces.
 - Approve sends **Enter** and Reject sends **Esc** to the session's Ghostty tab. Before sending, the Mac
   re-checks that the session is still waiting on the same prompt in the same tab, otherwise it refuses.
 - Talk audio goes robot → server → Gemini (`GEMINI_API_KEY`); models are tried in order (`STT_MODELS`) and
