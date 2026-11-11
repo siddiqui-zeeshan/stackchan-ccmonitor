@@ -1,8 +1,10 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
-from cc_monitor import Monitor  # noqa: E402
+from cc_monitor import Monitor, sentence  # noqa: E402
 
 NOW = 1_800_000_000.0
 
@@ -17,7 +19,7 @@ def test_leds_follow_most_urgent_state():
     m.apply("mac", {"type": "snapshot", "sessions": [sess(1, "idle")]}, now=NOW)
     assert m.display(now=NOW)["leds"] == "green"
     m.apply("mac", {"type": "update", "sessions": [sess(2, "busy")]}, now=NOW)
-    assert m.display(now=NOW)["leds"] == "yellow_breathe"
+    assert m.display(now=NOW)["leds"] == "rainbow"
     m.apply("mac", {"type": "update", "sessions": [sess(3, "waiting", waitingFor="input needed")]}, now=NOW)
     d = m.display(now=NOW)
     assert d["leds"] == "flash" and d["mood"] == "needs_you"
@@ -153,3 +155,104 @@ def test_prompt_during_quiet_hours_does_not_chime_after_they_end():
     m.apply("mac", {"type": "snapshot", "sessions": [sess(1, "waiting", idleSec=5)]}, now=night)
     assert not m.display(now=night)["chime"]
     assert not m.display(now=night + 300)["chime"], "08:03: stale prompt stays silent"
+
+
+# ---------------------------------------------------------------- main screen: stages, number, sentence
+
+def test_needs_you_becomes_still_waiting_after_two_minutes():
+    m = Monitor()
+    m.apply("mac", {"type": "snapshot", "sessions": [sess(1, "waiting", idleSec=5, ask="Bash: npm test")]}, now=NOW)
+    d = m.display(now=NOW)
+    assert (d["mood"], d["leds"]) == ("needs_you", "flash")
+    assert d["rows"][0]["waitingLong"] is False and d["rows"][0]["say"] == " wants to run"
+    d = m.display(now=NOW + 119)
+    assert d["mood"] == "needs_you", "under two minutes: still the first stage"
+    d = m.display(now=NOW + 125)
+    assert (d["mood"], d["leds"]) == ("still_waiting", "orange_flash")
+    assert d["rows"][0]["waitingLong"] is True and d["rows"][0]["say"] == " has waited 2 min"
+    assert d["rows"][0]["state"] == "needs_you", "still approvable: the row state does not change"
+
+
+def test_needs_you_becomes_still_waiting_when_you_are_away():
+    m = Monitor()
+    m.apply("mac", {"type": "snapshot", "sessions": [sess(1, "waiting", idleSec=5, ask="Bash: npm test")]}, now=NOW)
+    m.apply("mac", {"type": "idle", "idleSec": 150}, now=NOW + 30)
+    d = m.display(now=NOW + 30)
+    assert d["mood"] == "still_waiting" and d["rows"][0]["say"] == " is waiting for you"
+    m.apply("mac", {"type": "idle", "idleSec": 1}, now=NOW + 40)
+    assert m.display(now=NOW + 40)["mood"] == "needs_you", "back at the Mac and under two minutes"
+
+
+@pytest.mark.parametrize("state, ask, expected", [
+    ("needs_you", "Bash: npm run deploy:staging", {"say": " wants to run", "cut": 6}),
+    ("working", "Bash: cargo test", {"say": " is running", "cut": 6}),
+    ("needs_you", "Edit: /Users/z/proj/src/policy/rules.ts", {"say": " wants to edit", "cut": 6, "what": "policy/rules.ts"}),
+    ("working", "Read: controller/replay.go", {"say": " is reading", "cut": 6}),
+    ("working", "Grep: handleTimeout", {"say": " is searching", "cut": 6}),
+    ("working", "Bash: /usr/bin/make all", {"say": " is running", "cut": 6}),
+    ("needs_you", "mcp__slack__send_message: #general", {"say": " wants to use send_message", "cut": 26}),
+    ("working", "mcp__slack__send_message: #general", {"say": " is using send_message", "cut": 26}),
+    ("needs_you", "AskUserQuestion:", {"say": " has a question", "cut": 16, "what": "answer it in the terminal"}),
+    ("needs_you", "ExitPlanMode:", {"say": " has a plan to approve", "cut": 13, "what": "review it in the terminal"}),
+    ("needs_you", "Which database should I use?", {"say": " is asking", "cut": 0}),
+    ("working", "Note: checking the logs next", {"say": " is working", "cut": 0}),
+    ("working", "", {"say": " is working", "cut": 0}),
+    ("needs_you", "", {"say": " needs you", "cut": 0, "what": "needs your input"}),
+    ("ready", "…Tests pass. Open the PR?", {"say": " is ready", "cut": 0}),
+])
+def test_sentence_wording(state, ask, expected):
+    assert sentence(state, ask, "needs your input") == expected
+
+
+def test_rows_carry_the_sentence_for_the_robot():
+    m = Monitor()
+    m.apply("mac", {"type": "snapshot", "sessions": [
+        sess(1, "busy", ask="Edit: /Users/z/proj/src/policy/rules.ts"), sess(2, "idle", ask="Done.")]}, now=NOW)
+    rows = {r["session"]: r for r in m.display(now=NOW)["rows"]}
+    assert (rows["s1"]["say"], rows["s1"]["cut"], rows["s1"]["what"]) == (" is editing", 6, "policy/rules.ts")
+    assert rows["s2"]["say"] == " is ready" and "what" not in rows["s2"]
+
+
+@pytest.mark.parametrize("statuses, big, rest", [
+    (["waiting", "waiting", "busy", "busy", "busy", "idle"], [2, "need you"], ["3 working", "1 ready"]),
+    (["waiting", "idle"], [1, "needs you"], ["1 ready"]),
+    (["waiting"], [1, "needs you"], []),
+    (["busy", "busy", "busy", "idle", "idle"], [3, "working"], ["2 ready"]),
+    (["busy"], [1, "working"], []),
+    (["idle"] * 5, [5, "ready"], []),
+    ([], None, []),
+])
+def test_big_number_shows_the_most_urgent_group(statuses, big, rest):
+    m = Monitor()
+    m.apply("mac", {"type": "snapshot", "sessions": [sess(i, st) for i, st in enumerate(statuses)]}, now=NOW)
+    d = m.display(now=NOW + 60)
+    assert (d["big"], d["rest"]) == (big, rest)
+
+
+def test_spot_sentence_when_no_single_session_is_cycling():
+    m = Monitor()
+    assert m.display(now=NOW)["spot"] == {"bold": "Nothing running", "text": "", "sub": "", "session": ""}
+    m.apply("mac", {"type": "snapshot", "sessions": [sess(1, "busy"), sess(2, "idle"), sess(3, "idle")]}, now=NOW)
+    assert m.display(now=NOW)["spot"] is None, "working: the robot cycles through the rows itself"
+    m.apply("mac", {"type": "update", "sessions": [sess(1, "idle", ask="Tests pass. Open the PR?")]}, now=NOW + 10)
+    assert m.display(now=NOW + 11)["spot"] == {
+        "bold": "n1", "text": " just finished", "sub": "Tests pass. Open the PR?", "session": "s1"}
+    assert m.display(now=NOW + 30)["spot"] == {
+        "bold": "All 3", "text": " are ready", "sub": "for your next prompt", "session": ""}
+
+
+def test_spot_sentence_for_a_single_ready_session():
+    m = Monitor()
+    m.apply("mac", {"type": "snapshot", "sessions": [sess(1, "idle", ask="Deployed to staging.")]}, now=NOW)
+    assert m.display(now=NOW + 30)["spot"] == {
+        "bold": "n1", "text": " is ready", "sub": "Deployed to staging.", "session": "s1"}
+
+
+def test_hush_is_set_in_quiet_mode_and_quiet_hours():
+    """The robot holds its head still (no "thinking" moves) whenever chimes are silenced."""
+    m = Monitor(quiet_hours=(22, 8), tz_offset_min=0)
+    day = 1_800_000_000 - (1_800_000_000 % 86400) + 12 * 3600
+    night = day + 11 * 3600
+    assert m.display(now=day)["hush"] is False
+    assert m.display(now=day, quiet_mode=True)["hush"] is True
+    assert m.display(now=night)["hush"] is True

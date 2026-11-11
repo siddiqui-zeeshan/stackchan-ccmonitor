@@ -5,6 +5,11 @@
   GET /cc/preview             browser preview of the robot's display   (?token=<preview token> if set)
   GET /healthz
 
+The robot draws only what display() returns: mood (needs_you, still_waiting, working, just_finished,
+all_done, none), leds, chime, the big number + its caption, the other counts, and per row the wording of
+the main-screen sentence ("say"/"cut"/"what", see sentence()). "spot" is that sentence when it is not
+about one of the cycling rows.
+
 Configuration (environment): LISTEN_HOST, LISTEN_PORT, MAC_TOKENS (comma-separated), ROBOT_TOKEN,
 ROBOT_SECRET, PREVIEW_TOKEN (optional), QUIET_HOURS (e.g. "22-8", empty = none), TZ_OFFSET_MINUTES.
 """
@@ -16,6 +21,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +36,7 @@ AWAY_IDLE_S = 120          # Mac idle (no keyboard/mouse) longer than this = you
 CHIME_REPEAT_S = 120
 CHIME_MAX = 5
 JUST_FINISHED_S = 5
+STILL_WAITING_S = 120      # a prompt left unanswered this long (or while you are away) = "still waiting"
 HEARTBEAT_TIMEOUT_S = 180  # three missed 60 s heartbeats
 OFFLINE_DROP_S = 300
 MAX_ROWS = 12
@@ -40,8 +47,56 @@ WAITING_TEXT = {
     "sandbox request": "wants network access",
     "goal proposal": "goal to approve",
 }
-LEDS = {"needs_you": "flash", "working": "yellow_breathe", "all_done": "green", "none": "off", "offline": "dim_white"}
+LEDS = {"needs_you": "flash", "still_waiting": "orange_flash", "working": "rainbow", "all_done": "green",
+        "none": "off", "offline": "dim_white"}
 RANK = {"needs_you": 0, "working": 1, "ready": 2}
+
+# Tool -> wording for the robot's main-screen sentence: (waiting for your approval, working).
+_EDIT = (" wants to edit", " is editing")
+_SEARCH = (" wants to search", " is searching")
+_AGENT = (" wants to start an agent", " started an agent")
+VERBS = {
+    "Bash": (" wants to run", " is running"),
+    "Edit": _EDIT, "Write": _EDIT, "MultiEdit": _EDIT, "NotebookEdit": _EDIT,
+    "Read": (" wants to read", " is reading"),
+    "Grep": _SEARCH, "Glob": _SEARCH,
+    "WebFetch": (" wants to open", " is opening"),
+    "WebSearch": (" wants to search the web", " is searching the web"),
+    "Agent": _AGENT, "Task": _AGENT,
+    "AskUserQuestion": (" has a question", " has a question"),
+    "ExitPlanMode": (" has a plan to approve", " is planning"),
+}
+FILE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit", "Read"}
+NO_ARG_HINT = {"AskUserQuestion": "answer it in the terminal", "ExitPlanMode": "review it in the terminal"}
+_TOOL_ASK = re.compile(r"^([A-Za-z_][\w-]*):(?: (.*))?$", re.S)
+
+
+def sentence(state: str, ask: str, detail: str) -> dict[str, Any]:
+    """Wording for the robot's main screen: "<name><say>" on one line, then what it is about.
+
+    `ask` is cc-watch's summary: "Tool: argument" for a tool call, otherwise plain text. The second line
+    is `ask` minus its first `cut` bytes (the "Tool: " prefix), unless `what` replaces it.
+    """
+    if state == "ready":
+        return {"say": " is ready", "cut": 0}
+    waiting = state == "needs_you"
+    m = _TOOL_ASK.match(ask)
+    tool, arg = (m.group(1), m.group(2) or "") if m else ("", "")
+    if tool in VERBS:
+        say = VERBS[tool][0 if waiting else 1]
+    elif tool.startswith("mcp__"):
+        say = (" wants to use " if waiting else " is using ") + tool.rsplit("__", 1)[-1]
+    else:   # plain text (or a word followed by a colon that is not a tool)
+        out: dict[str, Any] = {"say": (" is asking" if ask else " needs you") if waiting else " is working", "cut": 0}
+        if waiting and not ask:
+            out["what"] = detail
+        return out
+    out = {"say": say, "cut": len(tool) + 2 if arg else len(ask.encode())}
+    if not arg and tool in NO_ARG_HINT:
+        out["what"] = NO_ARG_HINT[tool]
+    elif tool in FILE_TOOLS and arg.startswith(("/", "~/")) and arg.count("/") > 2:
+        out["what"] = "/".join(arg.split("/")[-2:])   # long path: keep the end, which is what you recognise
+    return out
 
 
 def state_of(status: str | None) -> str:
@@ -81,6 +136,7 @@ class Monitor:
     sessions: dict[tuple[str, str], Session] = field(default_factory=dict)
     macs: dict[str, Mac] = field(default_factory=dict)
     finished_at: float = 0.0           # last busy -> idle transition, for the "just finished" nod
+    finished_key: tuple[str, str] | None = None   # the session that made that transition
 
     # ---------------------------------------------------------------- input from Macs
 
@@ -119,6 +175,7 @@ class Monitor:
         if old is None or old.state != new_state:
             if old is not None and old.state == "working" and new_state == "ready":
                 self.finished_at = now
+                self.finished_key = key
             self.sessions[key] = Session(host, s["id"], s, new_state, since)
         else:
             old.data = s
@@ -149,8 +206,9 @@ class Monitor:
         now = time.time() if now is None else now
         rows = sorted(self.sessions.values(),
                       key=lambda s: (RANK[s.state], s.since if s.state == "needs_you" else -s.since))
+        long_wait = {(s.host, s.id) for s in rows if self._long_wait(s, now)}
         if any(s.state == "needs_you" for s in rows):
-            mood = "needs_you"
+            mood = "still_waiting" if long_wait else "needs_you"
         elif any(s.state == "working" for s in rows):
             mood = "working"
         elif rows:
@@ -180,28 +238,68 @@ class Monitor:
                     chime = chime or "short"
                     s.short_chimed = True
         led_mood = "all_done" if mood == "just_finished" else mood
+        counts = {k: sum(1 for s in rows if s.state == k) for k in ("needs_you", "working", "ready")}
+        n, w, r = counts["needs_you"], counts["working"], counts["ready"]
+        # The big number is the most urgent group; the rest are listed small beside it.
+        if n:
+            big, rest = [n, "needs you" if n == 1 else "need you"], [f"{w} working"] * bool(w) + [f"{r} ready"] * bool(r)
+        elif w:
+            big, rest = [w, "working"], [f"{r} ready"] * bool(r)
+        else:
+            big, rest = ([r, "ready"] if r else None), []
         return {
             "type": "display",
             "mood": mood,
             "leds": LEDS[led_mood],
             "chime": chime,
-            "rows": [self._row(s, now) for s in rows[:MAX_ROWS]],
+            "rows": [self._row(s, now, (s.host, s.id) in long_wait) for s in rows[:MAX_ROWS]],
             "more": max(0, len(rows) - MAX_ROWS),
             "count": len(rows),
-            "counts": {k: sum(1 for s in rows if s.state == k) for k in ("needs_you", "working", "ready")},
+            "counts": counts,
+            "big": big,
+            "rest": rest,
+            "spot": self._spot(mood, rows),
             "quiet": quiet_mode,
+            "hush": quiet_mode or self._quiet(now),
         }
 
-    def _row(self, s: Session, now: float) -> dict[str, Any]:
+    def _long_wait(self, s: Session, now: float) -> bool:
+        """A prompt you have left for a while, or that arrived while you are away from that Mac."""
+        if s.state != "needs_you":
+            return False
+        mac = self.macs.get(s.host)
+        return now - s.since >= STILL_WAITING_S or (mac is not None and mac.idle_sec > AWAY_IDLE_S)
+
+    def _spot(self, mood: str, rows: list[Session]) -> dict[str, str] | None:
+        """The main-screen sentence when it is not about one of the cycling rows (those use row["say"])."""
+        if mood == "none":
+            return {"bold": "Nothing running", "text": "", "sub": "", "session": ""}
+        if mood == "just_finished":
+            s = self.sessions.get(self.finished_key) if self.finished_key else None
+            if s is not None:
+                return {"bold": _title(s), "text": " just finished", "sub": s.data.get("ask") or "", "session": s.id}
+        if mood in ("just_finished", "all_done"):
+            if len(rows) == 1:
+                s = rows[0]
+                return {"bold": _title(s), "text": " is ready",
+                        "sub": s.data.get("ask") or "for your next prompt", "session": s.id}
+            return {"bold": f"All {len(rows)}", "text": " are ready", "sub": "for your next prompt", "session": ""}
+        return None
+
+    def _row(self, s: Session, now: float, long_wait: bool = False) -> dict[str, Any]:
         d = s.data
         detail = {"needs_you": WAITING_TEXT.get(d.get("waitingFor") or "", "needs you"),
                   "working": "working", "ready": "ready"}[s.state]
+        age = max(0, int(now - s.since))
+        words = sentence(s.state, d.get("ask") or "", detail)
+        if long_wait:
+            words["say"] = f" has waited {age // 60} min" if age >= STILL_WAITING_S else " is waiting for you"
         return {
             "session": s.id, "host": s.host, "project": d.get("project") or "?",
             "name": d.get("name") or "", "tab": d.get("tab") or "", "state": s.state,
             "detail": detail, "since": int(s.since * 1000), "ghostty": bool(d.get("terminal")),
-            "offline": self.offline(s.host, now), "ageSec": max(0, int(now - s.since)),
-            "ask": d.get("ask") or "",
+            "offline": self.offline(s.host, now), "ageSec": age,
+            "ask": d.get("ask") or "", "waitingLong": long_wait, **words,
         }
 
     def action_for(self, session_id: str, action: str, text: str = "") -> tuple[str | None, Any]:
@@ -220,6 +318,10 @@ class Monitor:
         for s in self.sessions.values():
             if s.state == "needs_you":
                 s.acked = True
+
+
+def _title(s: Session) -> str:
+    return s.data.get("name") or s.data.get("project") or "session"
 
 
 # -------------------------------------------------------------------- web app
