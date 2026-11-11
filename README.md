@@ -9,7 +9,7 @@ Shows every Claude Code session on your Macs on an M5Stack StackChan robot, and 
 
   | Mood | When | Screen and face | Side lights |
   |---|---|---|---|
-  | Working | nothing needs you, at least one session is busy | rainbow stripes drifting, eyes glancing | slow colour cycle |
+  | Working | nothing needs you, at least one session is busy | dark screen with a green grid, green eyes glancing | slow colour cycle |
   | Needs you | a session just asked for your answer | red, sweating | flashing red |
   | Still waiting | it has waited 2 min, or you are away from that Mac | orange, gritted teeth | flashing orange |
   | Just finished | a few seconds after a session finishes | yellow smiley with a heart | green |
@@ -110,8 +110,9 @@ raise the audio-decode task priority (fixes voice stutter). To go back to stock,
   (head). The firmware has no automated tests; check changes by building and running them on the robot.
   After the first `build.sh` run, a rebuild is quicker with the app files copied into
   `firmware/.work/StackChan/firmware/main/apps/app_cc_monitor/` and `idf.py build` run in the same Docker image.
-- The rainbow screen redraws the whole display about 11 times a second; every other face only redraws the
-  small area that moved.
+- Each frame, only the part of the screen that changed is sent to the display, so the faces cost little.
+  The working screen can be switched from the green grid to a drifting rainbow (`WORKING_GRID = false` in
+  `app_cc_monitor.cpp`); that one redraws the whole display about 11 times a second.
 - The app logs each mood change, nod and "thinking" move with the head's position (`[CC-MONITOR]` lines on
   the robot's USB serial console). If the head doesn't move and the log shows
   `[ScsServo] ... invalid current pos: -1` after every move, the servos aren't replying: turn the robot fully

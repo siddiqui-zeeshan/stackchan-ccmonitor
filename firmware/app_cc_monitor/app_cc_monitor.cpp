@@ -8,7 +8,7 @@
  * Main screen: the whole screen takes the mood's colour, with a pixel face on the left, one big number
  * beside it, and one sentence about the session that matters most (cycling when there are several).
  * Tap the sentence to open that session, tap anywhere else for the session list.
- * Moods: working (rainbow), needs_you (red, sweating), still_waiting (orange, gritted teeth),
+ * Moods: working (green grid on a dark screen, or a drifting rainbow: WORKING_GRID), needs_you (red, sweating), still_waiting (orange, gritted teeth),
  * just_finished (yellow smiley + heart), all_done (green smiley), none (asleep), offline (grey).
  * Head: tilted up in every mood except none/offline (down); a light nod when the mood changes; small
  * random "thinking" moves while working. Head panel: tap = acknowledge, long press = quiet mode.
@@ -52,15 +52,19 @@ static const uint32_t C_MUTED = 0x8B8F97;
 
 struct Look {
     uint32_t bg, ink;
-    bool rainbow;
+    bool rainbow;        // drifting rainbow background; text gets a black outline
+    bool grid = false;   // dark screen with a thin green grid and border; everything drawn in one green
 };
+
+// The working screen: true = green grid on a dark screen (trial), false = drifting rainbow.
+static const bool WORKING_GRID = true;
 
 // Mood ("needs_you", "still_waiting", ...) or session key ("needs", "waiting", "working", "ready") -> colours.
 static Look look_of(const std::string& k)
 {
     if (k == "needs_you" || k == "needs") return {0xE8380D, 0x190400, false};
     if (k == "still_waiting" || k == "waiting") return {0xF28A0C, 0x1A0A00, false};
-    if (k == "working") return {0x000000, 0xFFFFFF, true};
+    if (k == "working") return WORKING_GRID ? Look{0x2F3B0E, 0x5CF53A, false, true} : Look{0x000000, 0xFFFFFF, true};
     if (k == "just_finished") return {0xF2D40A, 0x1A1500, false};
     if (k == "all_done" || k == "ready") return {0x3CC95A, 0x06200D, false};
     if (k == "none") return {0x18244A, 0x8FA6E8, false};
@@ -175,10 +179,26 @@ static void bg_rainbow(Target& t, int step)
         }
 }
 
+// Dark screen with thin green lines every `spacing` px (0 = none) and a brighter green border.
+static void bg_grid(Target& t, uint32_t hex, int spacing, int border)
+{
+    bg_solid(t, hex);
+    const uint16_t LINE = rgb(0x1E8F35), EDGE = rgb(0x22C52E);
+    if (spacing > 0) {
+        for (int x = (t.w % spacing) / 2; x < t.w; x += spacing) fill(t, x, 0, 1, t.h, LINE);
+        for (int y = (t.h % spacing) / 2; y < t.h; y += spacing) fill(t, 0, y, t.w, 1, LINE);
+    }
+    fill(t, 0, 0, t.w, border, EDGE);
+    fill(t, 0, t.h - border, t.w, border, EDGE);
+    fill(t, 0, 0, border, t.h, EDGE);
+    fill(t, t.w - border, 0, border, t.h, EDGE);
+}
+
 static void band(Target& t, const std::string& key)   // header band of the list / session screen
 {
     Look l = look_of(key);
     if (l.rainbow) bg_rainbow(t, 0);
+    else if (l.grid) bg_grid(t, l.bg, 16, 2);
     else bg_solid(t, l.bg);
 }
 
@@ -188,7 +208,8 @@ static const char* HEART[8] = {".XX...XX.", "XXXX.XXXX", "XXXXXXXXX", "XXXXXXXXX
 // The face for one mood at time `s` seconds, centred near cell (fx, fy).
 static void face(Target& t, const std::string& mood, float s, int fx, int fy, uint32_t ink_hex)
 {
-    const uint16_t K = rgb(0x000000), WH = rgb(0xFFFFFF), INK = rgb(ink_hex);
+    const uint16_t K = rgb(0x000000), INK = rgb(ink_hex);
+    const uint16_t WH = look_of("working").grid ? INK : rgb(0xFFFFFF);   // working face: one colour
     if (mood == "working") {
         int look = (int)lroundf(sinf(s * 1.4f) * 1.2f);
         bool bl  = fmodf(s, 3.4f) > 3.25f;
@@ -318,13 +339,14 @@ static void frame(Target& t, const std::string& mood, bool solo, int big, uint32
     Look l  = look_of(mood);
     float s = (ms % 600000) / 1000.0f;
     if (l.rainbow) bg_rainbow(t, (int)tick);
+    else if (l.grid) bg_grid(t, l.bg, 32, 3);
     else bg_solid(t, l.bg);
     face(t, mood, s, solo ? 40 : 26, 20, l.ink);
     if (!solo) {
         if (big > 0) number(t, big, 258, 34, rgb(l.ink), l.rainbow);
         // Line above the sentence. On the rainbow: white with a thin black edge, like the text.
         if (l.rainbow) fill(t, 11, 176, 298, 4, rgb(0x000000));
-        fill(t, 12, 177, 296, 2, rgb(l.rainbow ? 0xFFFFFF : shade(l.bg, 0.62f)));
+        fill(t, 12, 177, 296, 2, rgb(l.rainbow ? 0xFFFFFF : l.grid ? l.ink : shade(l.bg, 0.62f)));
     }
 }
 
@@ -355,7 +377,8 @@ static bool diff(lv_area_t& out)
 // Small face for a session's state, on a 12x10 grid of g-sized cells.
 static void mini(Target& t, const std::string& key, int x, int y, int g)
 {
-    const uint16_t K = rgb(key == "working" ? 0xFFFFFF : 0x000000);
+    const Look wl    = look_of("working");
+    const uint16_t K = rgb(key != "working" ? 0x000000 : wl.grid ? wl.ink : 0xFFFFFF);
     auto p           = [&](int gx, int gy, int w, int h, uint16_t c) { fill(t, x + gx * g, y + gy * g, w * g, h * g, c); };
     if (key == "needs") {
         p(2, 3, 3, 3, K);
@@ -372,7 +395,8 @@ static void mini(Target& t, const std::string& key, int x, int y, int g)
     } else if (key == "working") {   // white on the rainbow: black edge first so it stands out
         static const int parts[3][4] = {{2, 2, 3, 3}, {7, 2, 3, 3}, {4, 8, 4, 1}};
         const int o = std::max(1, g / 2);
-        for (auto& q : parts) fill(t, x + q[0] * g - o, y + q[1] * g - o, q[2] * g + 2 * o, q[3] * g + 2 * o, rgb(0x000000));
+        if (wl.rainbow)
+            for (auto& q : parts) fill(t, x + q[0] * g - o, y + q[1] * g - o, q[2] * g + 2 * o, q[3] * g + 2 * o, rgb(0x000000));
         for (auto& q : parts) p(q[0], q[1], q[2], q[3], K);
     } else {
         p(2, 2, 2, 3, K);
@@ -388,6 +412,7 @@ static void block(Target& t, const std::string& key)
 {
     Look l = look_of(key);
     if (l.rainbow) bg_rainbow(t, 0);
+    else if (l.grid) bg_grid(t, l.bg, 0, 2);
     else bg_solid(t, l.bg);
     mini(t, key, 2, 4, 2);
 }
