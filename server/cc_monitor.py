@@ -526,6 +526,7 @@ async def handle_touch(app: web.Application, data: dict[str, Any]) -> None:
             mac = mon.macs.get(row["host"])
             if sess and mac and mac.ws and not mac.ws.closed and sess.data.get("terminal"):
                 await mac.ws.send_str(json.dumps({"type": "focus", "terminal": sess.data["terminal"]}))
+    log.info("touch: %s (quiet mode %s)", gesture, "on" if app[CFG]["quiet_mode"] else "off")
     app[CFG]["last_sent"] = None
     await push(app)
 
