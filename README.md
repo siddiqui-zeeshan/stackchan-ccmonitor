@@ -12,7 +12,7 @@ Shows every Claude Code session on your Macs on an M5Stack StackChan robot, and 
   | Working | nothing needs you, at least one session is busy | dark screen with a green grid, green eyes glancing | slow colour cycle |
   | Needs you | a session just asked for your answer | red, sweating | flashing red |
   | Still waiting | it has waited 2 min, or you are away from that Mac | orange, gritted teeth | flashing orange |
-  | Just finished | a few seconds after a session finishes | yellow smiley with a heart | green |
+  | Just finished | for 20 seconds after the last busy session finishes | yellow smiley with a heart | green |
   | All ready | every session waits for a new prompt | blue smiley | green |
   | Nothing running | no Claude sessions | dim blue, asleep | off |
   | Offline | the robot can't reach the server | grey, crossed-out eyes | dim white |

@@ -35,7 +35,7 @@ log = logging.getLogger("cc-monitor")
 AWAY_IDLE_S = 120          # Mac idle (no keyboard/mouse) longer than this = you are away
 CHIME_REPEAT_S = 120
 CHIME_MAX = 5
-JUST_FINISHED_S = 5
+JUST_FINISHED_S = 20       # how long the "just finished" face (heart) stays once the last busy session finishes
 STILL_WAITING_S = 120      # a prompt left unanswered this long (or while you are away) = "still waiting"
 HEARTBEAT_TIMEOUT_S = 180  # three missed 60 s heartbeats
 OFFLINE_DROP_S = 300

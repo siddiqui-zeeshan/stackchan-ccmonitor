@@ -78,7 +78,8 @@ def test_just_finished_then_all_done_and_gone():
     m.apply("mac", {"type": "snapshot", "sessions": [sess(1, "busy")]}, now=NOW)
     m.apply("mac", {"type": "update", "sessions": [sess(1, "idle")]}, now=NOW)
     assert m.display(now=NOW + 1)["mood"] == "just_finished"
-    assert m.display(now=NOW + 10)["mood"] == "all_done"
+    assert m.display(now=NOW + 19)["mood"] == "just_finished", "the heart stays for 20 seconds"
+    assert m.display(now=NOW + 21)["mood"] == "all_done"
     m.apply("mac", {"type": "gone", "id": "s1"}, now=NOW)
     assert m.display(now=NOW)["mood"] == "none"
 
@@ -237,7 +238,7 @@ def test_spot_sentence_when_no_single_session_is_cycling():
     m.apply("mac", {"type": "update", "sessions": [sess(1, "idle", ask="Tests pass. Open the PR?")]}, now=NOW + 10)
     assert m.display(now=NOW + 11)["spot"] == {
         "bold": "n1", "text": " just finished", "sub": "Tests pass. Open the PR?", "session": "s1"}
-    assert m.display(now=NOW + 30)["spot"] == {
+    assert m.display(now=NOW + 45)["spot"] == {
         "bold": "All 3", "text": " are ready", "sub": "for your next prompt", "session": ""}
 
 
