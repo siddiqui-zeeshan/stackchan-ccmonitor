@@ -9,7 +9,7 @@
  * beside it, and one sentence about the session that matters most (cycling when there are several).
  * Tap the sentence to open that session, tap anywhere else for the session list.
  * Moods: working (green grid on a dark screen, or a drifting rainbow: WORKING_GRID), needs_you (red, sweating), still_waiting (orange, gritted teeth),
- * just_finished (yellow smiley + heart), all_done (green smiley), none (asleep), offline (grey).
+ * just_finished (yellow smiley + heart), all_done (blue smiley), none (asleep), offline (grey).
  * Head: tilted up in every mood except none/offline (down); a light nod when the mood changes; small
  * random "thinking" moves while working. Head panel: tap = acknowledge, long press = quiet mode.
  *
@@ -66,7 +66,7 @@ static Look look_of(const std::string& k)
     if (k == "still_waiting" || k == "waiting") return {0xF28A0C, 0x1A0A00, false};
     if (k == "working") return WORKING_GRID ? Look{0x2F3B0E, 0x5CF53A, false, true} : Look{0x000000, 0xFFFFFF, true};
     if (k == "just_finished") return {0xF2D40A, 0x1A1500, false};
-    if (k == "all_done" || k == "ready") return {0x3CC95A, 0x06200D, false};
+    if (k == "all_done" || k == "ready") return {0x2F9BFF, 0x031A33, false};   // blue
     if (k == "none") return {0x18244A, 0x8FA6E8, false};
     return {0x4E5154, 0xC9CCCF, false};   // offline
 }
@@ -82,7 +82,7 @@ static uint32_t soft_of(const std::string& key)   // readable text colour for a 
     if (key == "needs") return 0xFF9A82;
     if (key == "waiting") return 0xFFC27A;
     if (key == "working") return 0xC9B8FF;
-    return 0x86E79D;
+    return 0x8CC8FF;   // ready: light blue
 }
 
 static std::string fmt_age(int s)

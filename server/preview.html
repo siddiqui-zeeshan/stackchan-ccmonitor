@@ -24,7 +24,7 @@
 <div class="meta"><button data-g="tap">tap (ack)</button><button data-g="double_tap">double tap row 1 (focus)</button><button data-g="long_press">long press (quiet)</button></div>
 <script>
 const FACES = { needs_you:"😰", still_waiting:"😬", working:"🧐", just_finished:"😄", all_done:"🙂", none:"😴" };
-const BG = { needs_you:"#E8380D", still_waiting:"#F28A0C", working:"linear-gradient(135deg,#fa0505,#fafa05,#05fa05,#05fafa,#0505fa,#fa05fa)", just_finished:"#F2D40A", all_done:"#3CC95A", none:"#18244A" };
+const BG = { needs_you:"#E8380D", still_waiting:"#F28A0C", working:"linear-gradient(135deg,#fa0505,#fafa05,#05fa05,#05fafa,#0505fa,#fa05fa)", just_finished:"#F2D40A", all_done:"#2F9BFF", none:"#18244A" };
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
 const leds = document.getElementById("leds"); leds.innerHTML = '<div class="led"></div>'.repeat(12);
 const q = new URLSearchParams(location.search).get("token");
