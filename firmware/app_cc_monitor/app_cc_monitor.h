@@ -93,5 +93,7 @@ private:
     uint32_t _nod_at = 0;        // when a pending nod starts (0 = none)
     uint32_t _nod_until = 0;     // when the nod's dip ends and the head returns
     uint32_t _think_at = 0;      // next small "thinking" move while working
+    bool _was_hold = false;      // list or session screen was open last time we looked: head held still
+    bool _pose_pending = false;  // the mood changed while held: take its resting pose once free
     bool _was_connected = false;
 };

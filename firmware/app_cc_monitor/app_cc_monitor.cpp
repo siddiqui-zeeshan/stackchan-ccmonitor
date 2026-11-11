@@ -944,6 +944,7 @@ void AppCcMonitor::onOpen()
     _sheet_band_key.clear();
     for (auto& k : _sheet_keys) k.clear();
     _nod_at = _nod_until = 0;
+    _pose_pending = _was_hold = false;
     _tap_flag  = false;
     _quit_flag = false;
     {
@@ -1157,7 +1158,11 @@ void AppCcMonitor::setMood(const std::string& mood)
     auto& motion  = GetStackChan().motion();
     auto is_down  = [](const std::string& m) { return m.empty() || m == "none" || m == "offline"; };
     uint32_t now  = GetHAL().millis();
-    if (is_down(mood)) {
+    bool hold     = _sheet_open || !_open_session.empty();
+    if (hold) {
+        _pose_pending = true;   // someone is using the touch screen: take the new pose once they are done
+        _nod_at       = 0;
+    } else if (is_down(mood)) {
         motion.lookAtNormalized(0.0f, HEAD_DOWN, 200);   // nothing to show: look at the desk
         _nod_at = _nod_until = 0;
     } else if (is_down(_mood)) {
@@ -1168,7 +1173,8 @@ void AppCcMonitor::setMood(const std::string& mood)
     }
     auto at = motion.getCurrentAngles();
     mclog::tagInfo(_tag, "mood {} -> {}: head {}, now at yaw {} pitch {}", _mood.empty() ? "-" : _mood, mood,
-                   is_down(mood) ? "down" : is_down(_mood) ? "up, then nod" : "nod", at.x, at.y);
+                   hold ? "held still (list or session screen open)" : is_down(mood) ? "down" : is_down(_mood) ? "up, then nod" : "nod",
+                   at.x, at.y);
     _think_at   = now + 4000;
     _mood       = mood;
     _spot_index = 0;
@@ -1350,6 +1356,31 @@ void AppCcMonitor::updateHead()
     uint32_t now = GetHAL().millis();
     auto& motion = GetStackChan().motion();
     bool busy    = _rec || _mic_alive;   // servo noise would end up in the recording
+    // The head holds still while the session list or a session screen is open: you are touching the screen.
+    bool hold = _sheet_open || !_open_session.empty();
+    if (hold != _was_hold) {
+        _was_hold = hold;
+        if (hold) {
+            _nod_at = 0;
+            if (!_nod_until) motion.stop();   // halt a "thinking" glide where it is (a nod finishes its return)
+            mclog::tagInfo(_tag, "head: holding still");
+        } else {
+            if (_pose_pending) {
+                bool down = _mood == "none" || _mood == "offline";
+                motion.lookAtNormalized(0.0f, down ? HEAD_DOWN : HEAD_UP, 250);
+                _pose_pending = false;
+            }
+            _think_at = now + 2000;
+            mclog::tagInfo(_tag, "head: free to move again");
+        }
+    }
+    if (hold) {
+        if (_nod_until && now >= _nod_until) {
+            _nod_until = 0;
+            motion.lookAtNormalized(0.0f, HEAD_UP, 350);
+        }
+        return;
+    }
     if (_nod_at && now >= _nod_at) {
         _nod_at = 0;
         if (!busy) {

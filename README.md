@@ -19,7 +19,9 @@ Shows every Claude Code session on your Macs on an M5Stack StackChan robot, and 
 
 - **Head**: tilted up towards you in every mood except nothing running and offline, where it looks down. A
   light nod whenever the mood changes, and small random "thinking" movements while working (none in quiet
-  mode or quiet hours, and none while you hold Talk).
+  mode or quiet hours, and none while you hold Talk). While the session list or a session screen is open the
+  head holds still, so the screen doesn't move under your finger; it takes up the current pose when you
+  close it.
 - **Session list** (tap the screen): up to 12 sessions, most urgent first, each with a small face in its
   state's colour. "view only" marks a session that isn't running in Ghostty. The X leaves the app.
 - **Session screen** (tap a session): what it's asking, **Approve** (hold 1 s) / **Reject**, **Talk**
