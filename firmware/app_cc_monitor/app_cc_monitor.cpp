@@ -12,6 +12,7 @@
  * just_finished (yellow smiley + heart), all_done (blue smiley), none (asleep), offline (grey).
  * Head: tilted up in every mood except none/offline (down); a light nod when the mood changes; small
  * random "thinking" moves while working. Head panel: tap = acknowledge, long press = quiet mode.
+ * Shake the robot: a dizzy face for 5 seconds (purple screen, spiral eyes), then back to the mood.
  *
  * The face and backgrounds are drawn as pixels into an LVGL canvas (no stock avatar is attached).
  */
@@ -68,6 +69,7 @@ static Look look_of(const std::string& k)
     if (k == "just_finished") return {0xF2D40A, 0x1A1500, false};
     if (k == "all_done" || k == "ready") return {0x2F9BFF, 0x031A33, false};   // blue
     if (k == "none") return {0x18244A, 0x8FA6E8, false};
+    if (k == "dizzy") return {0x8A4BE8, 0x14052E, false};   // shown for a few seconds after a shake
     return {0x4E5154, 0xC9CCCF, false};   // offline
 }
 
@@ -96,7 +98,8 @@ static std::string fmt_age(int s)
 
 namespace pix {
 
-static const int W = 320, H = 240, G = 4;   // G: size of one "big pixel" of the face
+static const int W = 320, H = 240;
+static int G = 4;   // size of one "big pixel" of the face (doubled for the dizzy face, which has the screen to itself)
 
 struct Target {
     uint16_t* buf;
@@ -289,6 +292,30 @@ static void face(Target& t, const std::string& mood, float s, int fx, int fy, ui
             cell(t, zx + 1, zy + 3, 1, 1, INK);
             cell(t, zx, zy + 4, 5, 1, INK);
         }
+    } else if (mood == "dizzy") {   // spinning spiral eyes, a travelling wobble for a mouth, stars circling
+        static const uint8_t SPIRAL[7] = {0b1111111, 0b0000001, 0b1111101, 0b1000101, 0b1011101, 0b1000001, 0b1111111};
+        int turn = ((int)(s / 0.12f)) % 4;
+        for (int e = -1; e <= 1; e += 2)
+            for (int y = 0; y < 7; y++)
+                for (int x = 0; x < 7; x++) {
+                    int sx = x, sy = y;
+                    for (int r = 0; r < (e < 0 ? turn : 3 - turn); r++) {   // quarter turns; the eyes spin opposite ways
+                        int old = sx;
+                        sx      = sy;
+                        sy      = 6 - old;
+                    }
+                    if (SPIRAL[sy] & (0b1000000 >> sx)) cell(t, fx + e * 11 - 3 + x, fy - 6 + y, 1, 1, K);
+                }
+        static const int wave[4] = {0, -1, 0, 1};
+        int phase = (int)(s / 0.15f);
+        for (int x = -8; x <= 8; x++) cell(t, fx + x, fy + 9 + wave[((x + phase) % 4 + 4) % 4], 1, 1, K);
+        const uint16_t STAR = rgb(0xFFE14A);
+        for (int i = 0; i < 3; i++) {
+            float a = s * 4.0f + i * 2.094f;
+            int x = fx + (int)lroundf(cosf(a) * 17), y = fy - 12 + (int)lroundf(sinf(a) * 3);
+            cell(t, x, y - 1, 1, 3, STAR);
+            cell(t, x - 1, y, 3, 1, STAR);
+        }
     } else {   // offline: crossed eyes; the picture jumps sideways now and then
         int jump = fmodf(s, 4.2f) > 4.05f ? 2 : 0;
         for (int e = -1; e <= 1; e += 2)
@@ -341,7 +368,13 @@ static void frame(Target& t, const std::string& mood, bool solo, int big, uint32
     if (l.rainbow) bg_rainbow(t, (int)tick);
     else if (l.grid) bg_grid(t, l.bg, 32, 3);
     else bg_solid(t, l.bg);
-    face(t, mood, s, solo ? 40 : 26, 20, l.ink);
+    if (mood == "dizzy") {   // nothing else on screen: draw it twice the size, centred
+        G = 8;
+        face(t, mood, s, 20, 16, l.ink);
+        G = 4;
+    } else {
+        face(t, mood, s, solo ? 40 : 26, 20, l.ink);
+    }
     if (!solo) {
         if (big > 0) number(t, big, 258, 34, rgb(l.ink), l.rainbow);
         // Line above the sentence. On the rainbow: white with a thin black edge, like the text.
@@ -903,6 +936,9 @@ static std::atomic<int> _open_flag{0};            // 1..12 = list row, 100 = the
 static std::atomic<bool> _scrolled_flag{false};   // list scrolled: keep the sheet open
 static size_t _touch_conn = 0;
 static std::atomic<uint32_t> _press_ms{0};
+static size_t _shake_conn = 0;
+static std::atomic<bool> _shake_flag{false};      // the motion sensor saw a shake
+static const uint32_t DIZZY_MS = 5000;
 static std::string _styled;   // mood the main-screen label colours / layout were last set for
 
 AppCcMonitor::AppCcMonitor()
@@ -945,6 +981,8 @@ void AppCcMonitor::onOpen()
     for (auto& k : _sheet_keys) k.clear();
     _nod_at = _nod_until = 0;
     _pose_pending = _was_hold = false;
+    _dizzy_until = 0;
+    _was_dizzy   = false;
     _tap_flag  = false;
     _quit_flag = false;
     {
@@ -972,6 +1010,11 @@ void AppCcMonitor::onOpen()
         } else if (g == HeadPetGesture::SwipeForward || g == HeadPetGesture::SwipeBackward) {
             send_touch("stroke");
         }
+    });
+
+    _shake_flag = false;
+    _shake_conn = GetHAL().onImuMotionEvent.connect([](ImuMotionEvent e) {
+        if (e == ImuMotionEvent::Shake) _shake_flag = true;
     });
 
     _running = true;
@@ -1180,9 +1223,23 @@ void AppCcMonitor::setMood(const std::string& mood)
     _spot_index = 0;
 }
 
+bool AppCcMonitor::isDizzy()
+{
+    return _dizzy_until && GetHAL().millis() < _dizzy_until;
+}
+
 // Labels of the main screen: number caption, the other counts, and the sentence (cycling if several).
 void AppCcMonitor::renderMain(bool advance)
 {
+    if (isDizzy()) {   // just the face; restyle for the real mood when it ends
+        _styled = "dizzy";
+        _shown_session.clear();
+        set_text(_line1, "");
+        set_text(_line2, "");
+        for (auto l : {_big_label, _rest_label, _mute}) show(l, false);
+        for (auto l : {_big_label, _rest_label, _line1, _line2}) halo(l, false);
+        return;
+    }
     Look look = look_of(_mood);
     bool solo = _mood == "none" || _mood == "offline";
     std::string l1, l2;
@@ -1311,9 +1368,10 @@ void AppCcMonitor::updateFace()
     if (_sheet_open || !_open_session.empty()) return;   // main screen is covered
     _face_ms = now;
     _face_tick++;
-    bool solo = _mood == "none" || _mood == "offline";
+    bool dizzy = isDizzy();
+    bool solo  = dizzy || _mood == "none" || _mood == "offline";
     pix::Target t{pix::nb, pix::W, pix::H};
-    pix::frame(t, _mood, solo, _big, now, _face_tick);
+    pix::frame(t, dizzy ? "dizzy" : _mood, solo, _big, now, _face_tick);
     lv_area_t area;
     if (pix::diff(area)) lv_obj_invalidate_area(_canvas, &area);
 }
@@ -1323,6 +1381,12 @@ void AppCcMonitor::updateLeds()
     uint32_t now = GetHAL().millis();
     if (now - _led_tick < 40) return;   // ~25 fps
     _led_tick = now;
+    if (isDizzy()) {   // purple, swapping sides
+        bool left = (now / 160) % 2 == 0;
+        GetStackChan().leftNeonLight().setColor(left ? 110 : 0, 0, left ? 170 : 0);
+        GetStackChan().rightNeonLight().setColor(left ? 0 : 110, 0, left ? 0 : 170);
+        return;
+    }
     uint8_t r = 0, g = 0, b = 0;
     if (_leds == "flash") {
         if ((now / 250) % 2 == 0) { r = 200; }                               // red, twice a second
@@ -1355,7 +1419,7 @@ void AppCcMonitor::updateHead()
 {
     uint32_t now = GetHAL().millis();
     auto& motion = GetStackChan().motion();
-    bool busy    = _rec || _mic_alive;   // servo noise would end up in the recording
+    bool busy    = _rec || _mic_alive || isDizzy();   // recording (servo noise), or just shaken (in someone's hand)
     // The head holds still while the session list or a session screen is open: you are touching the screen.
     bool hold = _sheet_open || !_open_session.empty();
     if (hold != _was_hold) {
@@ -1428,6 +1492,14 @@ void AppCcMonitor::onRunning()
         _spot_ms = now;
     }
     _was_connected = connected;
+    if (_shake_flag.exchange(false)) {
+        _dizzy_until = now + DIZZY_MS;
+        mclog::tagInfo(_tag, "shaken: dizzy for {} ms", DIZZY_MS);
+    }
+    if (isDizzy() != _was_dizzy) {   // dizzy started or wore off: hide or bring back the number and sentence
+        _was_dizzy = !_was_dizzy;
+        renderMain(false);
+    }
     if (connected && now - _spot_ms > 4000) {   // next session in the sentence
         renderMain(true);
         _spot_ms = now;
@@ -1455,6 +1527,7 @@ void AppCcMonitor::onClose()
     _running = false;
     _rec     = false;
     GetHAL().onHeadPetGesture.disconnect(_touch_conn);
+    GetHAL().onImuMotionEvent.disconnect(_shake_conn);
     {
         std::lock_guard<std::mutex> lock(_tx_mutex);
         if (_ws) _ws->Close();

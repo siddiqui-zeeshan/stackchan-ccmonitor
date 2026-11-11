@@ -34,6 +34,7 @@ private:
     void renderMain(bool advance);
     void renderSheet();
     void showSheet(bool show);
+    bool isDizzy();
     void updateFace();
     void updateLeds();
     void updateHead();
@@ -96,4 +97,6 @@ private:
     bool _was_hold = false;      // list or session screen was open last time we looked: head held still
     bool _pose_pending = false;  // the mood changed while held: take its resting pose once free
     bool _was_connected = false;
+    uint32_t _dizzy_until = 0;   // shaken: show the dizzy face until then
+    bool _was_dizzy = false;
 };
