@@ -30,7 +30,7 @@ Shows every Claude Code session on your Macs on an M5Stack StackChan robot, and 
 - **Chimes**: a brief chime when a session needs your input; a longer one, repeating every 2 min (up to 5×,
   tap the head to stop), when that Mac has had no keyboard/mouse activity for 2+ min. Silent in quiet hours.
 - **Head panel**: tap = acknowledge, long press = quiet mode (a mute mark shows top-left).
-- **Shake it**: a dizzy face for 5 seconds (purple screen, spinning spiral eyes, the side lights swapping
+- **Shake it**: a dizzy face for 5 seconds (orange screen, spinning spiral eyes, the side lights swapping
   sides), then back to the current mood. The head holds still meanwhile.
 
 No Claude Code config is changed: the Mac monitor only reads `~/.claude/sessions/*.json` (and the tail of a

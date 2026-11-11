@@ -12,7 +12,7 @@
  * just_finished (yellow smiley + heart), all_done (blue smiley), none (asleep), offline (grey).
  * Head: tilted up in every mood except none/offline (down); a light nod when the mood changes; small
  * random "thinking" moves while working. Head panel: tap = acknowledge, long press = quiet mode.
- * Shake the robot: a dizzy face for 5 seconds (purple screen, spiral eyes), then back to the mood.
+ * Shake the robot: a dizzy face for 5 seconds (orange screen, spiral eyes), then back to the mood.
  *
  * The face and backgrounds are drawn as pixels into an LVGL canvas (no stock avatar is attached).
  */
@@ -69,7 +69,7 @@ static Look look_of(const std::string& k)
     if (k == "just_finished") return {0xF2D40A, 0x1A1500, false};
     if (k == "all_done" || k == "ready") return {0x2F9BFF, 0x031A33, false};   // blue
     if (k == "none") return {0x18244A, 0x8FA6E8, false};
-    if (k == "dizzy") return {0x8A4BE8, 0x14052E, false};   // shown for a few seconds after a shake
+    if (k == "dizzy") return {0xF28A0C, 0x1A0A00, false};   // orange; shown for a few seconds after a shake
     return {0x4E5154, 0xC9CCCF, false};   // offline
 }
 
@@ -309,7 +309,7 @@ static void face(Target& t, const std::string& mood, float s, int fx, int fy, ui
         static const int wave[4] = {0, -1, 0, 1};
         int phase = (int)(s / 0.15f);
         for (int x = -8; x <= 8; x++) cell(t, fx + x, fy + 9 + wave[((x + phase) % 4 + 4) % 4], 1, 1, K);
-        const uint16_t STAR = rgb(0xFFE14A);
+        const uint16_t STAR = rgb(0xFFFFFF);   // white: yellow would be lost on the orange
         for (int i = 0; i < 3; i++) {
             float a = s * 4.0f + i * 2.094f;
             int x = fx + (int)lroundf(cosf(a) * 17), y = fy - 12 + (int)lroundf(sinf(a) * 3);
@@ -1381,10 +1381,10 @@ void AppCcMonitor::updateLeds()
     uint32_t now = GetHAL().millis();
     if (now - _led_tick < 40) return;   // ~25 fps
     _led_tick = now;
-    if (isDizzy()) {   // purple, swapping sides
+    if (isDizzy()) {   // orange, swapping sides
         bool left = (now / 160) % 2 == 0;
-        GetStackChan().leftNeonLight().setColor(left ? 110 : 0, 0, left ? 170 : 0);
-        GetStackChan().rightNeonLight().setColor(left ? 0 : 110, 0, left ? 0 : 170);
+        GetStackChan().leftNeonLight().setColor(left ? 200 : 0, left ? 80 : 0, 0);
+        GetStackChan().rightNeonLight().setColor(left ? 0 : 200, left ? 0 : 80, 0);
         return;
     }
     uint8_t r = 0, g = 0, b = 0;
