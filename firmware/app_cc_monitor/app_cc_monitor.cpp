@@ -592,6 +592,14 @@ static lv_obj_t* text(lv_obj_t* parent, const lv_font_t* font, uint32_t color)
     return l;
 }
 
+// One line of text that ends in "..." when it is too long. The height has to be fixed as well as the width:
+// a label with a free height wraps onto more lines instead (and then sits on top of whatever is below it).
+static void one_line(lv_obj_t* label, const lv_font_t* font)
+{
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(label, lv_font_get_line_height(font));
+}
+
 static void set_text(lv_obj_t* label, const std::string& s)   // only touch the label when the text changed
 {
     if (s != lv_label_get_text(label)) lv_label_set_text(label, s.c_str());
@@ -630,6 +638,7 @@ static void halo(lv_obj_t* label, bool on)
             set_text(c, lv_label_get_text(label));
             lv_label_set_long_mode(c, lv_label_get_long_mode(label));
             lv_obj_set_width(c, lv_obj_get_style_width(label, LV_PART_MAIN));
+            lv_obj_set_height(c, lv_obj_get_style_height(label, LV_PART_MAIN));
             lv_obj_set_style_text_align(c, lv_obj_get_style_text_align(label, LV_PART_MAIN), 0);
             lv_obj_set_pos(c, lv_obj_get_style_x(label, LV_PART_MAIN) + dx[i], lv_obj_get_style_y(label, LV_PART_MAIN) + dy[i]);
         }
@@ -785,16 +794,16 @@ static void build_session_screen(lv_obj_t* scr)
 
     _ss_title = outlined_text(_ss, &lv_font_montserrat_20, 0x000000);
     lv_obj_set_width(_ss_title, 206);
-    lv_label_set_long_mode(_ss_title, LV_LABEL_LONG_DOT);
+    one_line(_ss_title, &lv_font_montserrat_20);
     lv_obj_set_pos(_ss_title, 52, 7);
     _ss_sub = outlined_text(_ss, &lv_font_montserrat_14, 0x000000);
     lv_obj_set_width(_ss_sub, 206);
-    lv_label_set_long_mode(_ss_sub, LV_LABEL_LONG_DOT);
+    one_line(_ss_sub, &lv_font_montserrat_14);
     lv_obj_set_pos(_ss_sub, 52, 32);
 
     _ss_status = text(_ss, &lv_font_montserrat_16, C_TEXT);
     lv_obj_set_width(_ss_status, 292);
-    lv_label_set_long_mode(_ss_status, LV_LABEL_LONG_DOT);
+    one_line(_ss_status, &lv_font_montserrat_16);
     lv_obj_set_pos(_ss_status, 14, 60);
 
     _ss_ask_box = box(_ss, C_PANEL, LV_OPA_COVER);
@@ -1047,9 +1056,9 @@ void AppCcMonitor::buildUi()
     lv_obj_set_pos(_rest_label, 200, 120);
 
     _line1 = outlined_text(scr, &lv_font_montserrat_16, 0x000000);       // "<session> wants to run"
-    lv_label_set_long_mode(_line1, LV_LABEL_LONG_DOT);
+    one_line(_line1, &lv_font_montserrat_16);
     _line2 = outlined_text(scr, &lv_font_montserrat_14, 0x000000);       // "npm run deploy:staging"
-    lv_label_set_long_mode(_line2, LV_LABEL_LONG_DOT);
+    one_line(_line2, &lv_font_montserrat_14);
 
     _mute = text(scr, &lv_font_montserrat_14, 0x000000);
     lv_label_set_text(_mute, LV_SYMBOL_MUTE);
@@ -1115,13 +1124,13 @@ void AppCcMonitor::buildUi()
         _sheet_faces[i] = canvas(c, _mini_px[i], 28, 28);       // small face in the session's colour
         lv_obj_set_pos(_sheet_faces[i], 4, 3);
         _sheet_names[i] = text(c, &lv_font_montserrat_16, 0xFFFFFF);
-        lv_label_set_long_mode(_sheet_names[i], LV_LABEL_LONG_DOT);
+        one_line(_sheet_names[i], &lv_font_montserrat_16);
         lv_obj_align(_sheet_names[i], LV_ALIGN_LEFT_MID, 40, 0);
         _sheet_tags[i] = text(c, &lv_font_montserrat_14, C_MUTED);   // "view only": not in Ghostty
         lv_label_set_text(_sheet_tags[i], "view only");
         _sheet_details[i] = text(c, &lv_font_montserrat_14, C_MUTED);
         lv_obj_set_width(_sheet_details[i], 96);
-        lv_label_set_long_mode(_sheet_details[i], LV_LABEL_LONG_DOT);
+        one_line(_sheet_details[i], &lv_font_montserrat_14);
         lv_obj_set_style_text_align(_sheet_details[i], LV_TEXT_ALIGN_RIGHT, 0);
         lv_obj_align(_sheet_details[i], LV_ALIGN_RIGHT_MID, -8, 0);
         lv_obj_add_flag(c, LV_OBJ_FLAG_HIDDEN);
