@@ -107,6 +107,8 @@ raise the audio-decode task priority (fixes voice stutter). To go back to stock,
 - The robot only draws what the server sends, so the rules live in `server/cc_monitor.py` and are covered by
   `tests/`: which mood applies, when "needs you" becomes "still waiting" (`STILL_WAITING_S`, or the Mac idle
   longer than `AWAY_IDLE_S`), the big number, and the sentence wording per tool (`VERBS`, `sentence()`).
+- A session whose status is `shell` (Claude is idle, but a background command it started, such as a dev
+  server, is still running) counts as ready, not working: "working" means the agent itself is busy.
 - Faces, colours and head movement are in `firmware/app_cc_monitor/app_cc_monitor.cpp`: `look_of()` (colours),
   `pix::face()` (one face per mood, drawn as 4 px cells into an LVGL canvas), `setMood()` / `updateHead()`
   (head). The firmware has no automated tests; check changes by building and running them on the robot.

@@ -256,3 +256,16 @@ def test_hush_is_set_in_quiet_mode_and_quiet_hours():
     assert m.display(now=day)["hush"] is False
     assert m.display(now=day, quiet_mode=True)["hush"] is True
     assert m.display(now=night)["hush"] is True
+
+
+def test_shell_status_counts_as_ready():
+    """"shell" = Claude is idle, but a background command it started (a dev server, say) is still running."""
+    m = Monitor()
+    m.apply("mac", {"type": "snapshot", "sessions": [sess(1, "shell"), sess(2, "idle")]}, now=NOW)
+    d = m.display(now=NOW + 60)
+    assert d["mood"] == "all_done" and d["counts"] == {"needs_you": 0, "working": 0, "ready": 2}
+    assert {r["say"] for r in d["rows"]} == {" is ready"}
+    m.apply("mac", {"type": "update", "sessions": [sess(1, "busy")]}, now=NOW + 61)
+    assert m.display(now=NOW + 61)["mood"] == "working"
+    m.apply("mac", {"type": "update", "sessions": [sess(1, "shell")]}, now=NOW + 70)
+    assert m.display(now=NOW + 71)["mood"] == "just_finished", "busy -> shell: Claude finished its turn"

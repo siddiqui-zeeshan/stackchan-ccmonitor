@@ -130,7 +130,7 @@ fn ask_summary(cwd: &str, sid: &str, status: &str) -> String {
 }
 
 /// waiting: the pending request (tool call, else question). busy: the latest tool call or text.
-/// idle: the end of Claude's last reply (usually its conclusion or a question to you).
+/// idle / shell: the end of Claude's last reply (usually its conclusion or a question to you).
 fn summarize_transcript(text: &str, status: &str) -> String {
     let squash = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     for line in text.lines().rev() {
@@ -151,7 +151,7 @@ fn summarize_transcript(text: &str, status: &str) -> String {
             }
         }
         let chars = |s: String| -> Vec<char> { squash(&s).chars().collect() };
-        if status == "idle" {
+        if status == "idle" || status == "shell" {   // shell: idle with a background command still running
             if said.trim().is_empty() { continue; }        // idle: skip tool-only lines, find the reply
             let c = chars(said);
             return if c.len() > 220 { format!("…{}", c[c.len() - 220..].iter().collect::<String>()) }
@@ -642,6 +642,14 @@ mod tests {
     #[test]
     fn ready_session_shows_end_of_last_reply() {
         assert_eq!(summarize_transcript(T, "idle"), "Build finished. Should I also run the tests?");
+    }
+
+    #[test]
+    fn shell_session_is_ready_and_shows_end_of_last_reply() {
+        // "shell" = Claude is idle while a background command it started is still running.
+        assert_eq!(summarize_transcript(T, "shell"), "Build finished. Should I also run the tests?");
+        let long = format!(r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{}THE END"}}]}}}}"#, "x".repeat(500));
+        assert!(summarize_transcript(&long, "shell").ends_with("THE END"));
     }
 
     #[test]

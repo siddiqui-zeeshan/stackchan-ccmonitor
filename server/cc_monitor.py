@@ -103,9 +103,11 @@ def state_of(status: str | None) -> str:
     """Session file status -> robot state. Unknown values count as working (format may change)."""
     if status == "waiting":
         return "needs_you"
-    if status == "idle":
+    if status in ("idle", "shell"):
+        # "shell": Claude itself is idle, but a background command it started (a dev server, a watcher, a
+        # long build) is still running. Showing that as working would suggest the agent is doing something.
         return "ready"
-    return "working"  # busy, shell, or anything new
+    return "working"  # busy, or anything new
 
 
 @dataclass
