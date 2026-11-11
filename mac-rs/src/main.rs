@@ -10,12 +10,15 @@ use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::io::ErrorKind;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
-use tungstenite::client::IntoClientRequest;
-use tungstenite::stream::MaybeTlsStream;
+use tungstenite::client::{uri_mode, IntoClientRequest};
+use tungstenite::handshake::client::Request;
+use tungstenite::handshake::HandshakeError;
+use tungstenite::stream::{MaybeTlsStream, Mode};
 use tungstenite::Message;
 
 fn log(s: &str) {
@@ -362,18 +365,68 @@ impl Watch {
 
 // ---------------------------------------------------------------------- network thread
 
+type Ws = tungstenite::WebSocket<MaybeTlsStream<TcpStream>>;
+
+/// How long each step of connecting (TCP connect, TLS, WebSocket upgrade) may wait on the server.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn ws_request(server: &str, token: &str) -> Result<Request, String> {
+    let mut req = server.into_client_request().map_err(|e| e.to_string())?;
+    let auth = format!("Bearer {token}").parse().map_err(|_| "token has invalid characters".to_string())?;
+    req.headers_mut().insert("Authorization", auth);
+    Ok(req)
+}
+
+/// Open the WebSocket to the server. Every step gives up after `timeout`: a link that dies
+/// mid-handshake (the Mac going back to sleep, a network change) must fail so the caller retries,
+/// instead of blocking the network thread forever. `tungstenite::connect` has no such timeout.
+fn connect_ws(req: Request, timeout: Duration) -> Result<Ws, String> {
+    let mode = uri_mode(req.uri()).map_err(|e| e.to_string())?;
+    let host = req.uri().host().ok_or("server URL has no host")?;
+    let host = host.trim_start_matches('[').trim_end_matches(']').to_string(); // IPv6 literal
+    let port = req.uri().port_u16().unwrap_or(match mode { Mode::Plain => 80, Mode::Tls => 443 });
+
+    let mut tcp = Err(format!("no address for {host}"));
+    for addr in (host.as_str(), port).to_socket_addrs().map_err(|e| e.to_string())? {
+        tcp = TcpStream::connect_timeout(&addr, timeout).map_err(|e| e.to_string());
+        if tcp.is_ok() { break; }
+    }
+    let tcp = tcp?;
+    let _ = tcp.set_nodelay(true);
+    tcp.set_read_timeout(Some(timeout)).map_err(|e| e.to_string())?;
+    tcp.set_write_timeout(Some(timeout)).map_err(|e| e.to_string())?;
+
+    // A read that hits the timeout surfaces as "would block" from both handshakes below.
+    let stream = match mode {
+        Mode::Plain => MaybeTlsStream::Plain(tcp),
+        Mode::Tls => {
+            let tls = native_tls::TlsConnector::new().map_err(|e| e.to_string())?;
+            match tls.connect(&host, tcp) {
+                Ok(s) => MaybeTlsStream::NativeTls(s),
+                Err(native_tls::HandshakeError::WouldBlock(_)) => return Err("TLS handshake timed out".into()),
+                Err(native_tls::HandshakeError::Failure(e)) => return Err(e.to_string()),
+            }
+        }
+    };
+    match tungstenite::client(req, stream) {
+        Ok((ws, _)) => Ok(ws),
+        Err(HandshakeError::Interrupted(_)) => Err("WebSocket handshake timed out".into()),
+        Err(HandshakeError::Failure(e)) => Err(e.to_string()),
+    }
+}
+
 fn net_loop(server: String, token: String, rx: Receiver<String>, resync: Sender<()>, inbox: Sender<Value>) {
     loop {
-        let mut req = match server.as_str().into_client_request() {
+        let req = match ws_request(&server, &token) {
             Ok(r) => r,
             Err(e) => {
                 log(&format!("bad server URL: {e}"));
                 std::process::exit(1);
             }
         };
-        req.headers_mut().insert("Authorization", format!("Bearer {token}").parse().unwrap());
-        match tungstenite::connect(req) {
-            Ok((mut ws, _)) => {
+        match connect_ws(req, CONNECT_TIMEOUT) {
+            Ok(mut ws) => {
+                log("connected");
                 match ws.get_mut() {
                     MaybeTlsStream::Plain(s) => { let _ = s.set_read_timeout(Some(Duration::from_millis(250))); }
                     MaybeTlsStream::NativeTls(s) => { let _ = s.get_ref().set_read_timeout(Some(Duration::from_millis(250))); }
@@ -510,6 +563,67 @@ mod tests {
         r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#, "\n",
         r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Build finished.\n\nShould I also run the tests?"}]}}"#, "\n",
     );
+
+    /// A server that accepts connections and then says nothing (like a link that died mid-handshake).
+    fn silent_server() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for conn in listener.incoming().flatten() {
+                held.push(conn); // keep it open, never reply
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn connect_gives_up_when_the_server_never_answers() {
+        use super::{connect_ws, ws_request};
+        use std::time::{Duration, Instant};
+        // ws: stalls waiting for the upgrade reply; wss: stalls inside the TLS handshake.
+        for scheme in ["ws", "wss"] {
+            let url = format!("{scheme}://127.0.0.1:{}/cc/mac", silent_server());
+            let (tx, rx) = std::sync::mpsc::channel();
+            let started = Instant::now();
+            std::thread::spawn(move || {
+                let res = connect_ws(ws_request(&url, "t").unwrap(), Duration::from_millis(300));
+                let _ = tx.send(res.map(|_| ()));
+            });
+            match rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(res) => {
+                    let err = res.expect_err("a silent server is not a connection");
+                    assert!(err.contains("timed out"), "{scheme}: {err}");
+                    assert!(started.elapsed() < Duration::from_secs(3), "{scheme}: took {:?}", started.elapsed());
+                }
+                Err(_) => panic!("{scheme}: connect is still waiting after 5 s; it must give up"),
+            }
+        }
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)] // the callback's error type is fixed by tungstenite
+    fn connect_reaches_a_ws_server_and_sends_the_token() {
+        use super::{connect_ws, ws_request};
+        use std::time::Duration;
+        use tungstenite::handshake::server::{Request, Response};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (conn, _) = listener.accept().unwrap();
+            let mut auth = String::new();
+            let mut ws = tungstenite::accept_hdr(conn, |req: &Request, resp: Response| {
+                auth = req.headers().get("Authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                Ok(resp)
+            }).unwrap();
+            let msg = ws.read().unwrap().into_text().unwrap().to_string();
+            (auth, msg)
+        });
+        let url = format!("ws://127.0.0.1:{port}/cc/mac");
+        let mut ws = connect_ws(ws_request(&url, "secret").unwrap(), Duration::from_secs(2)).expect("connects");
+        ws.send(tungstenite::Message::text("hello")).unwrap();
+        assert_eq!(server.join().unwrap(), ("Bearer secret".to_string(), "hello".to_string()));
+    }
 
     #[test]
     fn terminal_matches_by_pid_then_by_tty() {

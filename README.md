@@ -30,6 +30,9 @@ Mac(s): cc-watch ──ws──▶ server: cc-monitor ◀──ws── robot: C
 | `firmware/` | Robot app source, patches on top of official StackChan v1.6.2, `build.sh` |
 | `tests/` | Server rule tests (`pytest tests`) |
 
+Mac monitor tests live in `mac-rs/src/main.rs` (`cd mac-rs && cargo test`): transcript summaries, Ghostty
+tab matching, and connecting (token header, giving up on a server that never answers).
+
 ## Setup
 
 ### 1. Server (run it on an always-on machine; any host reachable by the Macs and the robot)
@@ -62,6 +65,12 @@ This builds `cc-watch`, installs it to `~/Applications/cc-watch`, writes `~/.con
 starts it at login (LaunchAgent `dev.stackchan.cc-watch`). Log: `~/Library/Logs/cc-watch.log`.
 macOS asks once to let it control **Ghostty** (needed for tab names and Approve/Reject/Talk).
 Uninstall: `./install.sh --uninstall`.
+
+If the server can't be reached, `cc-watch` retries every 5 s. Each attempt gives up after 10 s per step
+(TCP connect, TLS, WebSocket upgrade), so a link that dies mid-connect (the Mac going back to sleep, a
+network change) is retried instead of hanging. The log shows `connected` after each successful connect and
+`connect failed: …` / `disconnected: …` otherwise. If the robot says "No sessions" while sessions are
+running, check that the last of those lines in the log is `connected`.
 
 ### 3. Robot firmware
 Needs Docker, git, python3, and `pip install esptool`. Connect the robot by USB-C, then:
