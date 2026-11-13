@@ -29,7 +29,9 @@ Shows every Claude Code session on your Macs on an M5Stack StackChan robot, and 
   Actions work for sessions running in Ghostty; other sessions are view-only.
 - **Chimes**: a brief chime when a session needs your input; a longer one, repeating every 2 min (up to 5×,
   tap the head to stop), when that Mac has had no keyboard/mouse activity for 2+ min. Silent in quiet hours.
-- **Head panel**: tap = acknowledge, long press = quiet mode (a mute mark shows top-left).
+- **Head panel**: tap = acknowledge, long press (hold 1.5 s without moving the finger) = quiet mode on/off
+  (a mute mark shows top-left). Stroking the head does neither. Quiet mode is kept on the server, so a robot
+  restart doesn't clear it; the server log shows each touch (`touch: long_press (quiet mode on)`).
 - **Shake it**: a dizzy face for 5 seconds (orange screen, spinning spiral eyes, the side lights swapping
   sides), then back to the current mood. The head holds still meanwhile.
 

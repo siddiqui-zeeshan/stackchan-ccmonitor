@@ -945,6 +945,7 @@ static std::atomic<int> _open_flag{0};            // 1..12 = list row, 100 = the
 static std::atomic<bool> _scrolled_flag{false};   // list scrolled: keep the sheet open
 static size_t _touch_conn = 0;
 static std::atomic<uint32_t> _press_ms{0};
+static std::atomic<bool> _stroked{false};   // the finger moved along the panel since it went down
 static size_t _shake_conn = 0;
 static std::atomic<bool> _shake_flag{false};      // the motion sensor saw a shake
 static const uint32_t DIZZY_MS = 5000;
@@ -1009,7 +1010,11 @@ void AppCcMonitor::onOpen()
         uint32_t now = GetHAL().millis();
         if (g == HeadPetGesture::Press) {
             _press_ms = now;
+            _stroked  = false;
         } else if (g == HeadPetGesture::Release) {
+            // The firmware reports Release after a stroke too. Only a finger that stayed still is a tap or a
+            // long press; otherwise petting the head for 1.5 s would toggle quiet mode.
+            if (_stroked.exchange(false)) return;
             uint32_t held = now - _press_ms.load();
             if (held >= 1500) {
                 send_touch("long_press");
@@ -1017,6 +1022,7 @@ void AppCcMonitor::onOpen()
                 send_touch("tap");
             }
         } else if (g == HeadPetGesture::SwipeForward || g == HeadPetGesture::SwipeBackward) {
+            _stroked = true;
             send_touch("stroke");
         }
     });
