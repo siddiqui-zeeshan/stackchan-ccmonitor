@@ -2,13 +2,24 @@
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>StackChan preview</title>
 <style>
-  body { background:#1d1d1f; color:#eee; font:14px -apple-system, system-ui, sans-serif; margin:24px; }
-  .robot { width:320px; height:240px; background:#000; border-radius:12px; overflow:hidden; position:relative;
-           box-shadow:0 0 0 10px #333; margin:30px auto 16px; }
-  .face { height:96px; display:flex; align-items:center; justify-content:center; font-size:52px; font-weight:700; color:#000; }
-  .rows { padding:0 10px; }
-  .row { display:flex; justify-content:space-between; font-size:13px; padding:3px 4px; border-radius:4px; }
-  .row.needs_you { background:#5a1400; } .row.needs_you.long { background:#5a3400; } .say { text-align:center; padding:6px 10px; font-size:13px; } .row .state { opacity:.85; } .more { font-size:12px; opacity:.6; text-align:right; padding-right:8px; }
+  body { background:#1d1d1f; color:#eee; font:14px -apple-system, system-ui, sans-serif; margin:24px 16px; }
+  /* The robot's 320x240 screen, shown twice the size. Positions inside are the robot's own pixels. */
+  .robot { width:640px; max-width:100%; aspect-ratio:4/3; margin:20px auto 12px; border-radius:14px; overflow:hidden;
+           box-shadow:0 0 0 10px #333; position:relative; }
+  .screen { position:absolute; left:0; top:0; width:320px; height:240px; transform-origin:0 0; }
+  .screen img { position:absolute; left:0; top:0; width:320px; height:240px; image-rendering:pixelated; }
+  .screen .t { position:absolute; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-weight:600; }
+  #big { left:200px; top:28px; width:116px; text-align:center; font-size:64px; line-height:64px; font-weight:800; }
+  #bigText { left:200px; top:96px; width:116px; text-align:center; font-size:16px; }
+  #rest { left:200px; top:120px; width:116px; text-align:center; font-size:14px; line-height:17px; white-space:pre; }
+  #line1 { font-size:16px; } #line2 { font-size:14px; font-weight:500; }
+  #mute { left:8px; top:6px; font-size:13px; }
+  .rows { max-width:640px; margin:0 auto; }
+  .row { display:flex; align-items:center; gap:10px; font-size:13px; padding:4px 6px; border-radius:4px; background:#26272b; margin-bottom:4px; }
+  .row img { width:28px; height:28px; image-rendering:pixelated; flex:none; }
+  .row .name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .row .state { opacity:.8; white-space:nowrap; }
+  .more { font-size:12px; opacity:.6; text-align:right; padding-right:8px; }
   .leds { display:flex; gap:6px; justify-content:center; margin:8px; }
   .led { width:16px; height:16px; border-radius:50%; background:#222; }
   .flash .led { background:#ff2d2d; animation:blink .5s infinite; } .orange_flash .led { background:#ff8a1f; animation:blink .5s infinite; }
@@ -18,33 +29,64 @@
   .meta { text-align:center; opacity:.6; } button { margin:4px; }
 </style></head>
 <body>
-<div class="robot"><div class="face" id="face">😴</div><div class="say" id="say"></div><div class="rows" id="rows"></div></div>
+<div class="robot"><div class="screen">
+  <img id="face" alt="">
+  <div class="t" id="big"></div><div class="t" id="bigText"></div><div class="t" id="rest"></div>
+  <div class="t" id="line1"></div><div class="t" id="line2"></div><div class="t" id="mute">muted</div>
+</div></div>
 <div class="leds" id="leds"></div>
 <div class="meta" id="meta">connecting…</div>
 <div class="meta"><button data-g="tap">tap (ack)</button><button data-g="double_tap">double tap row 1 (focus)</button><button data-g="long_press">long press (quiet)</button></div>
+<div class="rows" id="rows"></div>
 <script>
-const FACES = { needs_you:"😰", still_waiting:"😬", working:"🧐", just_finished:"😄", all_done:"🙂", none:"😴" };
-const BG = { needs_you:"#E8380D", still_waiting:"#F28A0C", working:"linear-gradient(135deg,#fa0505,#fafa05,#05fa05,#05fafa,#0505fa,#fa05fa)", just_finished:"#F2D40A", all_done:"#2F9BFF", none:"#18244A" };
-const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
-const leds = document.getElementById("leds"); leds.innerHTML = '<div class="led"></div>'.repeat(12);
+// The faces are drawn from the robot's own code (firmware/app_cc_monitor/pix.h) by firmware/render.
+// Text colour per mood: the "ink" in look_of() in pix.h.
+const INK = { needs_you:"#190400", still_waiting:"#1A0A00", working:"#5CF53A", just_finished:"#1A1500", all_done:"#031A33", none:"#8FA6E8", offline:"#C9CCCF" };
 const q = new URLSearchParams(location.search).get("token");
+const face = name => `/cc/preview/faces/${name}.png${q ? "?token=" + encodeURIComponent(q) : ""}`;
+const $ = id => document.getElementById(id);
+const fit = () => document.querySelector(".screen").style.transform = `scale(${document.querySelector(".robot").clientWidth / 320})`;
+fit(); addEventListener("resize", fit);
+const leds = $("leds"); leds.innerHTML = '<div class="led"></div>'.repeat(12);
+const ago = ms => { const s = Math.max(0, Math.round((Date.now() - ms) / 1000)); return s < 60 ? s + "s" : s < 3600 ? Math.round(s / 60) + "m" : Math.round(s / 3600) + "h"; };
+const rowKey = r => r.state === "needs_you" ? (r.waitingLong ? "waiting" : "needs") : r.state === "working" ? "working" : "ready";
+
+function show(mood, big, bigText, rest, l1, l2, muted) {
+  if ($("face").dataset.mood !== mood) { $("face").src = face(mood); $("face").dataset.mood = mood; }
+  const solo = mood === "none" || mood === "offline";
+  for (const id of ["big", "bigText", "rest", "line1", "line2", "mute"]) $(id).style.color = INK[mood];
+  $("big").textContent = solo || !big ? "" : big; $("bigText").textContent = solo || !big ? "" : bigText;
+  $("rest").textContent = solo || !big ? "" : rest.join("\n");
+  for (const [id, y] of [["line1", solo ? 186 : 184], ["line2", solo ? 210 : 209]]) {
+    Object.assign($(id).style, { top: y + "px", left: (solo ? 10 : 16) + "px", width: (solo ? 300 : 288) + "px", textAlign: solo ? "center" : "left" });
+  }
+  $("line1").textContent = l1; $("line2").textContent = l2;
+  $("mute").style.display = muted ? "" : "none";
+}
+
 const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/cc/preview/ws${q ? "?token=" + encodeURIComponent(q) : ""}`);
-const ago = ms => { const s = Math.max(0, Math.round((Date.now() - ms) / 1000)); return s < 60 ? s + "s" : Math.round(s / 60) + "m"; };
 ws.onmessage = ev => {
   const d = JSON.parse(ev.data);
-  document.getElementById("face").textContent = (d.big ? d.big[0] + " " : "") + (FACES[d.mood] || "🙂");
-  document.getElementById("face").style.background = BG[d.mood] || "#000";
   // The sentence the robot shows: its first cycling row, or the server's "spot" sentence.
-  const want = d.mood === "working" ? "working" : "needs_you", r0 = d.rows.find(r => r.state === want && !d.spot);
-  document.getElementById("say").innerHTML = r0 ? `<b>${esc(r0.name || r0.project)}</b>${esc(r0.say)}<br>${esc(r0.what || r0.ask.slice(r0.cut))}`
-    : d.spot ? `<b>${esc(d.spot.bold)}</b>${esc(d.spot.text)}<br>${esc(d.spot.sub)}` : "";
+  const want = d.mood === "working" ? "working" : (d.mood === "needs_you" || d.mood === "still_waiting") ? "needs_you" : "";
+  const r0 = d.rows.find(r => r.state === want);
+  const [l1, l2] = r0 ? [(r0.name || r0.project) + r0.say, r0.what || (r0.ask || "").slice(r0.cut)]
+    : d.spot ? [d.spot.bold + d.spot.text, d.spot.sub] : ["", ""];
+  show(d.mood, d.big?.[0], d.big?.[1], d.rest || [], l1, l2, d.quiet);
   leds.className = "leds " + d.leds;
-  document.getElementById("rows").innerHTML = d.rows.map(r =>
-    `<div class="row ${r.state}${r.waitingLong ? " long" : ""}"><span>${r.ghostty ? "▣" : "□"} ${esc(r.project)} · ${esc(r.name)}${r.offline ? " (offline)" : ""}</span><span class="state">${esc(r.detail)} ${ago(r.since)}</span></div>`
-  ).join("") + (d.more ? `<div class="more">+${d.more} more</div>` : "");
-  document.getElementById("meta").textContent = `mood: ${d.mood} · leds: ${d.leds} · sessions: ${d.count}${d.chime ? " · 🔔 CHIME" : ""}`;
+  $("rows").innerHTML = "";
+  for (const r of d.rows) {
+    const el = document.createElement("div"); el.className = "row";
+    const img = document.createElement("img"); img.src = face("row-" + rowKey(r)); img.alt = "";
+    const name = document.createElement("span"); name.className = "name";
+    name.textContent = `${r.ghostty ? "" : "(view only) "}${r.name || r.project}  ·  ${r.project} on ${r.host}${r.offline ? " (offline)" : ""}`;
+    const st = document.createElement("span"); st.className = "state"; st.textContent = `${r.detail} ${ago(r.since)}`;
+    el.append(img, name, st); $("rows").append(el);
+  }
+  if (d.more) { const m = document.createElement("div"); m.className = "more"; m.textContent = `+${d.more} more`; $("rows").append(m); }
+  $("meta").textContent = `mood: ${d.mood} · leds: ${d.leds} · sessions: ${d.count}${d.chime ? " · CHIME" : ""}`;
 };
-ws.onclose = () => document.getElementById("meta").textContent = "disconnected";
+ws.onclose = () => { show("offline", 0, "", [], "Not connected", "the preview lost the server", false); $("meta").textContent = "disconnected"; };
 document.querySelectorAll("button").forEach(b => b.onclick = () => ws.send(JSON.stringify({ type:"touch", gesture:b.dataset.g, row:0 })));
 </script>
 </body></html>

@@ -270,3 +270,37 @@ def test_shell_status_counts_as_ready():
     assert m.display(now=NOW + 61)["mood"] == "working"
     m.apply("mac", {"type": "update", "sessions": [sess(1, "shell")]}, now=NOW + 70)
     assert m.display(now=NOW + 71)["mood"] == "just_finished", "busy -> shell: Claude finished its turn"
+
+
+@pytest.mark.parametrize("path, token, status", [
+    ("/cc/preview/faces/needs_you.png", "pt", 200),
+    ("/cc/preview/faces/row-waiting.png", "pt", 200),
+    ("/cc/preview/faces/needs_you.png", "", 404),            # the preview token covers the faces too
+    ("/cc/preview/faces/needs_you.png", "wrong", 404),
+    ("/cc/preview/faces/happy.png", "pt", 404),              # not a face that was drawn
+    ("/cc/preview/faces/..%2Fcc_monitor.py", "pt", 404),     # nothing outside faces/
+    ("/cc/preview/faces/..%2F.env.local", "pt", 404),
+])
+def test_preview_faces_are_served_only_from_faces_dir(path, token, status):
+    import asyncio
+    from aiohttp.test_utils import TestClient, TestServer
+    from cc_monitor import make_app
+
+    async def run():
+        cfg = {"mac_tokens": ["m"], "robot_token": "r", "robot_secret": "sec", "preview_token": "pt"}
+        async with TestClient(TestServer(make_app(cfg))) as c:
+            r = await c.get(path, params={"token": token} if token else None)
+            assert r.status == status
+            if status == 200:
+                assert r.content_type == "image/png"
+                assert (await r.read())[:8] == b"\x89PNG\r\n\x1a\n"
+    asyncio.run(run())
+
+
+def test_every_mood_and_row_state_has_a_face():
+    """The preview shows faces/<mood>.png and faces/row-<state>.png; firmware/render/render.sh draws them."""
+    from cc_monitor import FACES
+    moods = {"needs_you", "still_waiting", "working", "just_finished", "all_done", "none", "offline"}
+    rows = {"needs", "waiting", "working", "ready"}
+    have = {p.name for p in FACES.glob("*.png")}
+    assert {f"{m}.png" for m in moods} | {f"row-{k}.png" for k in rows} <= have

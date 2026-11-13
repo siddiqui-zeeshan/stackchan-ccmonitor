@@ -27,7 +27,7 @@ fi
 
 APP="$WORK/StackChan/firmware/main/apps/app_cc_monitor"
 mkdir -p "$APP"
-cp "$HERE"/app_cc_monitor/app_cc_monitor.cpp "$HERE"/app_cc_monitor/app_cc_monitor.h "$APP/"
+cp "$HERE"/app_cc_monitor/app_cc_monitor.cpp "$HERE"/app_cc_monitor/app_cc_monitor.h "$HERE"/app_cc_monitor/pix.h "$APP/"
 umask 077
 printf '#pragma once\n#define CC_MONITOR_URL "%s"\n#define CC_MONITOR_TOKEN "%s"\n' "$URL" "$TOKEN" > "$APP/cc_monitor_config.h"
 touch "$WORK/StackChan/firmware/main/CMakeLists.txt"   # pick up new source files

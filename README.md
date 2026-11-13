@@ -49,10 +49,12 @@ Mac(s): cc-watch ──ws──▶ server: cc-monitor ◀──ws── robot: C
 | `mac/` | Swift version of the same monitor (~19 MB RAM) and `install.sh` |
 | `server/` | Server: merges Macs, decides mood/LEDs/chime and the sentence wording, routes actions, transcribes Talk (Gemini) |
 | `firmware/` | Robot app source (draws its own pixel faces), patches on top of official StackChan v1.6.2, `build.sh` |
+| `firmware/render/` | Draws the robot's faces on a Mac into `server/faces/`, for the browser preview |
 | `tests/` | Server rule tests (`pytest tests`) |
 
 Mac monitor tests live in `mac-rs/src/main.rs` (`cd mac-rs && cargo test`): transcript summaries, Ghostty
 tab matching, and connecting (token header, giving up on a server that never answers).
+`firmware/render/render.sh --check` fails if `server/faces/` no longer matches the robot's drawing code.
 
 ## Setup
 
@@ -113,20 +115,28 @@ raise the audio-decode task priority (fixes voice stutter). To go back to stock,
   longer than `AWAY_IDLE_S`), the big number, and the sentence wording per tool (`VERBS`, `sentence()`).
 - A session whose status is `shell` (Claude is idle, but a background command it started, such as a dev
   server, is still running) counts as ready, not working: "working" means the agent itself is busy.
-- Faces, colours and head movement are in `firmware/app_cc_monitor/app_cc_monitor.cpp`: `look_of()` (colours),
-  `pix::face()` (one face per mood, drawn as 4 px cells into an LVGL canvas), `setMood()` / `updateHead()`
-  (head). The firmware has no automated tests; check changes by building and running them on the robot.
+- Faces and colours are in `firmware/app_cc_monitor/pix.h`: `look_of()` (colours), `pix::face()` (one face
+  per mood, drawn as 4 px cells), `pix::mini()` (the small faces in the session list). It has no LVGL or
+  ESP-IDF code, so it also builds on a Mac. Head movement is in `app_cc_monitor.cpp` (`setMood()` /
+  `updateHead()`).
+- To see a face change without flashing, run `firmware/render/render.sh` (needs only the Mac's compiler,
+  `xcode-select --install`). It draws every mood as an animated PNG into `server/faces/`; open them in a
+  browser, or run the server locally and open `/cc/preview`. Commit `server/faces/` with the change: the
+  preview shows those files, and `render.sh --check` reports when they are out of date.
+- The firmware has no automated tests beyond that; check changes by building and running them on the robot.
   After the first `build.sh` run, a rebuild is quicker with the app files copied into
   `firmware/.work/StackChan/firmware/main/apps/app_cc_monitor/` and `idf.py build` run in the same Docker image.
 - Each frame, only the part of the screen that changed is sent to the display, so the faces cost little.
   The working screen can be switched from the green grid to a drifting rainbow (`WORKING_GRID = false` in
-  `app_cc_monitor.cpp`); that one redraws the whole display about 11 times a second.
+  `pix.h`); that one redraws the whole display about 11 times a second.
 - The app logs each mood change, nod and "thinking" move with the head's position (`[CC-MONITOR]` lines on
   the robot's USB serial console). If the head doesn't move and the log shows
   `[ScsServo] ... invalid current pos: -1` after every move, the servos aren't replying: turn the robot fully
   off and on (a USB reset restarts the main chip but not the servos).
-- Browser preview (`/cc/preview`): a rough view of the same state (mood colour, number, sentence, rows). It
-  does not draw the pixel faces.
+- Browser preview (`/cc/preview`, with `?token=<PREVIEW_TOKEN>` if set): the robot's main screen with its
+  real pixel faces (from `server/faces/`), the number, the sentence and the side lights, then the session
+  list with each session's small face. The number is plain text rather than the robot's pixel digits. The
+  buttons send head-panel touches as if from the robot, including a long press (quiet mode on/off).
 - Approve sends **Enter** and Reject sends **Esc** to the session's Ghostty tab. Before sending, the Mac
   re-checks that the session is still waiting on the same prompt in the same tab, otherwise it refuses.
 - Talk audio goes robot → server → Gemini (`GEMINI_API_KEY`); models are tried in order (`STT_MODELS`) and

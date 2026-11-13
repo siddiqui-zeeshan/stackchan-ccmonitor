@@ -3,6 +3,7 @@
   WS  /cc/mac                 Macs (cc-watch) send snapshots/updates   (Authorization: Bearer <mac token>)
   WS  /<secret>/cc/robot      the robot receives display states        (Authorization: Bearer <robot token>)
   GET /cc/preview             browser preview of the robot's display   (?token=<preview token> if set)
+  GET /cc/preview/faces/<n>   the robot's faces for it, drawn from the firmware by firmware/render (same token)
   GET /healthz
 
 The robot draws only what display() returns: mood (needs_you, still_waiting, working, just_finished,
@@ -540,6 +541,20 @@ async def preview(request: web.Request) -> web.Response:
     return web.FileResponse(Path(__file__).with_name("preview.html"))
 
 
+FACES = Path(__file__).with_name("faces")
+
+
+async def preview_face(request: web.Request) -> web.Response:
+    """One of the images in faces/ (see firmware/render): "<mood>.png" or "row-<state>.png"."""
+    cfg = request.app[CFG]
+    if cfg["preview_token"] and not _ok(_bearer(request), [cfg["preview_token"]]):
+        raise web.HTTPNotFound()
+    name = request.match_info["name"]
+    if name not in {p.name for p in FACES.glob("*.png")}:   # only files that are there: no path tricks
+        raise web.HTTPNotFound()
+    return web.FileResponse(FACES / name, headers={"Cache-Control": "max-age=3600"})
+
+
 async def healthz(_: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
@@ -565,6 +580,7 @@ def make_app(cfg: dict[str, Any]) -> web.Application:
     app.router.add_get(f"/{cfg['robot_secret']}/cc/robot", robot_ws)
     app.router.add_get("/cc/preview", preview)
     app.router.add_get("/cc/preview/ws", preview_ws)
+    app.router.add_get("/cc/preview/faces/{name}", preview_face)
     app.router.add_get("/healthz", healthz)
     return app
 
