@@ -12,7 +12,8 @@ the main-screen sentence ("say"/"cut"/"what", see sentence()). "spot" is that se
 about one of the cycling rows.
 
 Configuration (environment): LISTEN_HOST, LISTEN_PORT, MAC_TOKENS (comma-separated), ROBOT_TOKEN,
-ROBOT_SECRET, PREVIEW_TOKEN (optional), QUIET_HOURS (e.g. "22-8", empty = none), TZ_OFFSET_MINUTES.
+ROBOT_SECRET, PREVIEW_TOKEN (optional), QUIET_HOURS (e.g. "22-8", empty = none),
+TZ_OFFSET_MINUTES (minutes east of UTC, default 330; "local" = this machine's time zone, following daylight saving).
 """
 
 from __future__ import annotations
@@ -135,7 +136,7 @@ class Mac:
 @dataclass
 class Monitor:
     quiet_hours: tuple[int, int] | None = None
-    tz_offset_min: int = 0
+    tz_offset_min: int | None = 0   # None: this machine's local time, following daylight saving
     sessions: dict[tuple[str, str], Session] = field(default_factory=dict)
     macs: dict[str, Mac] = field(default_factory=dict)
     finished_at: float = 0.0           # last busy -> idle transition, for the "just finished" nod
@@ -200,7 +201,8 @@ class Monitor:
     def _quiet(self, now: float) -> bool:
         if not self.quiet_hours:
             return False
-        hour = int(((now / 60 + self.tz_offset_min) // 60) % 24)
+        offset = self.tz_offset_min if self.tz_offset_min is not None else time.localtime(now).tm_gmtoff // 60
+        hour = int(((now / 60 + offset) // 60) % 24)
         start, end = self.quiet_hours
         return (start <= hour or hour < end) if start > end else (start <= hour < end)
 
@@ -588,6 +590,7 @@ def make_app(cfg: dict[str, Any]) -> web.Application:
 def config_from_env() -> dict[str, Any]:
     e = os.environ
     qh = e.get("QUIET_HOURS", "22-8").strip()
+    tz = e.get("TZ_OFFSET_MINUTES", "330").strip()   # minutes east of UTC, or "local"
     quiet = tuple(int(x) for x in qh.split("-")) if qh else None
     cfg = {
         "host": e.get("LISTEN_HOST", "0.0.0.0"),
@@ -597,7 +600,7 @@ def config_from_env() -> dict[str, Any]:
         "robot_secret": e.get("ROBOT_SECRET", ""),
         "preview_token": e.get("PREVIEW_TOKEN", ""),
         "quiet_hours": quiet,
-        "tz_offset_min": int(e.get("TZ_OFFSET_MINUTES", "330")),
+        "tz_offset_min": None if tz == "local" else int(tz),
     }
     if not cfg["mac_tokens"] or not cfg["robot_token"] or not cfg["robot_secret"]:
         raise SystemExit("set MAC_TOKENS, ROBOT_TOKEN and ROBOT_SECRET")

@@ -4,8 +4,10 @@
 #   ./setup.sh                    install everything, flash the robot (plugged in by USB), pair with it
 #   ./setup.sh --pair             pair again (robot plugged in by USB and restarted in the last 2 minutes)
 #   ./setup.sh --uninstall        remove the programs and LaunchAgents (keeps ~/.config/cc-monitor)
-#   ./setup.sh --firmware <zip>   flash this package (from firmware/build.sh --ble --package) instead of the release
-#   ./setup.sh --dry-run          write the config files only: no build, download, flash, pairing or LaunchAgents
+#   ./setup.sh --firmware <zip>   flash your own package (firmware/build.sh --ble --package) instead of the release
+#                                 (the release download is checked against firmware/ble-firmware.sha256; your own
+#                                 package is used as given)
+#   ./setup.sh --dry-run          write the config files and check the firmware: no build, flash, pairing or LaunchAgents
 #
 # On this Mac afterwards:
 #   dev.stackchan.cc-monitor  the server (server/cc_monitor.py), on 127.0.0.1:8810 only
@@ -14,7 +16,7 @@
 # Logs: ~/Library/Logs/cc-monitor.log, cc-watch.log, cc-ble.log
 set -eu
 REPO=$(cd "$(dirname "$0")" && pwd)
-RELEASE_URL=https://github.com/siddiqui-zeeshan/stackchan-ccmonitor/releases/download/ble-v1/stackchan-cc-ble.zip
+RELEASE_URL=${CC_RELEASE_URL:-https://github.com/siddiqui-zeeshan/stackchan-ccmonitor/releases/download/ble-v1/stackchan-cc-ble.zip}
 SUPPORT="$HOME/Library/Application Support/cc-monitor"
 CONF="$HOME/.config/cc-monitor"
 AGENTS="$HOME/Library/LaunchAgents"
@@ -33,7 +35,7 @@ while [ $# -gt 0 ]; do
     --pair) MODE=pair ;;
     --uninstall) MODE=uninstall ;;
     --firmware) [ $# -ge 2 ] || { echo "--firmware needs a zip"; exit 1; }; FIRMWARE=$2; shift ;;
-    *) sed -n '2,13p' "$0"; exit 1 ;;
+    *) sed -n '2,15p' "$0"; exit 1 ;;
   esac
   shift
 done
@@ -71,27 +73,47 @@ fi
 # ---------------------------------------------------------------- checks
 if [ "$DRY" = 0 ]; then
   xcode-select -p >/dev/null 2>&1 || { say "Run xcode-select --install first, then run this again."; exit 1; }
+fi
+
+# ---------------------------------------------------------------- firmware package (checked before anything changes)
+mkdir -p "$SUPPORT"
+if [ -z "$FIRMWARE" ]; then
+  want_sha=${CC_FIRMWARE_SHA256:-$(awk '{print $1; exit}' "$REPO/firmware/ble-firmware.sha256")}
+  FIRMWARE="$SUPPORT/stackchan-cc-ble.zip"
+  say "Downloading the robot firmware..."
+  curl -fsSL -o "$FIRMWARE" "$RELEASE_URL"
+  got_sha=$(shasum -a 256 "$FIRMWARE" | awk '{print $1}')
+  if [ "$got_sha" != "$want_sha" ]; then
+    rm -f "$FIRMWARE"
+    say "The downloaded firmware doesn't match the expected checksum; not using it."
+    say "  expected $want_sha"
+    say "  got      $got_sha"
+    exit 1
+  fi
+else
+  [ -f "$FIRMWARE" ] || { say "No such file: $FIRMWARE"; exit 1; }
+  say "Using your own firmware package $FIRMWARE (sha256 $(shasum -a 256 "$FIRMWARE" | awk '{print $1}'))"
+fi
+rm -rf "$SUPPORT/firmware"
+mkdir -p "$SUPPORT/firmware"
+unzip -q "$FIRMWARE" -d "$SUPPORT/firmware"
+# ESP-IDF 6 writes --flash-mode etc.; esptool 4 (what pip gives the Mac's own Python 3.9) only knows --flash_mode.
+# esptool 5 accepts both, so use the old spelling throughout.
+sed -e 's/--flash-mode/--flash_mode/; s/--flash-freq/--flash_freq/; s/--flash-size/--flash_size/' \
+  "$SUPPORT/firmware/flash_args" > "$SUPPORT/firmware/flash_args.tmp"
+mv "$SUPPORT/firmware/flash_args.tmp" "$SUPPORT/firmware/flash_args"
+flash() {   # flash <port>; in a dry run only says what it would run
+  set -- "$VENV/bin/python" -m esptool --chip esp32s3 -p "$1" -b 460800 --before default_reset --after hard_reset \
+    write_flash @flash_args
+  if [ "$DRY" = 1 ]; then say "Would flash with: $*"; else (cd "$SUPPORT/firmware" && "$@"); fi
+}
+
+if [ "$DRY" = 0 ]; then
   agent_stop "$SERVER_LABEL"   # a re-run: free our own port first
   if busy=$(lsof -nP -iTCP:$PORT -sTCP:LISTEN 2>/dev/null | awk 'NR == 2 {print $1 " (pid " $2 ")"}') && [ -n "$busy" ]; then
     say "Port $PORT is in use by $busy. Stop it and run this again."
     exit 1
   fi
-fi
-
-# ---------------------------------------------------------------- firmware package (checked before anything else)
-want_sha=${CC_FIRMWARE_SHA256:-$(awk '{print $1; exit}' "$REPO/firmware/ble-firmware.sha256")}
-mkdir -p "$SUPPORT"
-if [ -z "$FIRMWARE" ]; then
-  FIRMWARE="$SUPPORT/stackchan-cc-ble.zip"
-  say "Downloading the robot firmware..."
-  curl -fsSL -o "$FIRMWARE" "$RELEASE_URL"
-fi
-got_sha=$(shasum -a 256 "$FIRMWARE" | awk '{print $1}')
-if [ "$got_sha" != "$want_sha" ]; then
-  say "The firmware package doesn't match the expected checksum; not using it."
-  say "  expected $want_sha"
-  say "  got      $got_sha"
-  exit 1
 fi
 
 # ---------------------------------------------------------------- tokens (kept across re-runs)
@@ -109,17 +131,11 @@ MAC_TOKEN=$(sed -n 's/^MAC_TOKEN=//p' "$CONF/server.env")
 ROBOT_TOKEN=$(sed -n 's/^ROBOT_TOKEN=//p' "$CONF/server.env")
 ROBOT_SECRET=$(sed -n 's/^ROBOT_SECRET=//p' "$CONF/server.env")
 
-# Quiet hours (the server's QUIET_HOURS, default 22-8) are in this Mac's local time.
-z=$(date +%z)   # e.g. +0530
-sign=$(printf %s "$z" | cut -c1) hh=$(printf %s "$z" | cut -c2-3) mm=$(printf %s "$z" | cut -c4-5)
-TZ_MIN=$(( ${hh#0} * 60 + ${mm#0} ))
-if [ "$sign" = "-" ]; then TZ_MIN=$(( -TZ_MIN )); fi
-
 # ---------------------------------------------------------------- server
 if [ "$DRY" = 0 ]; then
   say "Setting up the server..."
   [ -x "$VENV/bin/python" ] || python3 -m venv "$VENV"
-  "$VENV/bin/pip" install -q --disable-pip-version-check -r "$REPO/server/requirements.txt" esptool
+  "$VENV/bin/pip" install -q --disable-pip-version-check -r "$REPO/server/requirements.txt" "esptool>=4.8,<6"
   rm -rf "$SUPPORT/server"
   mkdir -p "$SUPPORT/server"
   cp -R "$REPO/server/cc_monitor.py" "$REPO/server/preview.html" "$REPO/server/faces" "$SUPPORT/server/"
@@ -139,7 +155,7 @@ cat > "$AGENTS/$SERVER_LABEL.plist" <<EOF
     <key>ROBOT_SECRET</key><string>$ROBOT_SECRET</string>
     <key>PREVIEW_TOKEN</key><string></string>
     <key>GEMINI_API_KEY</key><string></string>
-    <key>TZ_OFFSET_MINUTES</key><string>$TZ_MIN</string>
+    <key>TZ_OFFSET_MINUTES</key><string>local</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -177,7 +193,8 @@ cat > "$AGENTS/$BLE_LABEL.plist" <<EOF
 </dict></plist>
 EOF
 if [ "$DRY" = 1 ]; then
-  say "Dry run: wrote $CONF, $HOME/.config/cc-watch and the LaunchAgents in $AGENTS; firmware checksum OK."
+  say "Dry run: wrote $CONF, $HOME/.config/cc-watch and the LaunchAgents in $AGENTS."
+  flash /dev/cu.usbmodemXXXX
   exit 0
 fi
 say "Building cc-ble..."
@@ -185,9 +202,6 @@ mkdir -p "$HOME/Applications"
 sh "$REPO/mac/ble/build.sh" "$BIN"
 
 # ---------------------------------------------------------------- flash the robot, then pair
-rm -rf "$SUPPORT/firmware"
-mkdir -p "$SUPPORT/firmware"
-unzip -q "$FIRMWARE" -d "$SUPPORT/firmware"
 set -- /dev/cu.usbmodem*
 flashed=0
 if [ ! -e "$1" ]; then
@@ -198,18 +212,19 @@ else
   printf 'Flash the robot on %s? It replaces the firmware on it. [y/N] ' "$1"
   read -r answer
   if [ "$answer" = y ] || [ "$answer" = Y ]; then
-    (cd "$SUPPORT/firmware" && "$VENV/bin/python" -m esptool --chip esp32s3 -p "$1" -b 460800 \
-      --before default-reset --after hard-reset write-flash @flash_args)
+    flash "$1"
     flashed=1
     say "Flashed. The robot restarts into CC Monitor."
     sleep 8
   fi
 fi
 
-if [ "$flashed" = 1 ] || [ -z "$robot" ]; then
+if [ "$flashed" = 1 ]; then
   pair
-else
+elif [ -n "$robot" ]; then
   agent_load "$BLE_LABEL"
+else
+  say "Not paired yet: once the robot runs this firmware, plug it in, restart it and run ./setup.sh --pair."
 fi
 say ""
 say "Done. Logs: $LOGS/cc-monitor.log, cc-watch.log, cc-ble.log. Preview: http://127.0.0.1:$PORT/cc/preview"

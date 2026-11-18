@@ -1,10 +1,11 @@
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
-from cc_monitor import Monitor, sentence  # noqa: E402
+from cc_monitor import Monitor, config_from_env, sentence  # noqa: E402
 
 NOW = 1_800_000_000.0
 
@@ -304,3 +305,28 @@ def test_every_mood_and_row_state_has_a_face():
     rows = {"needs", "waiting", "working", "ready"}
     have = {p.name for p in FACES.glob("*.png")}
     assert {f"{m}.png" for m in moods} | {f"row-{k}.png" for k in rows} <= have
+
+
+@pytest.mark.parametrize("when_utc", [
+    "2027-01-15T03:30:00+00:00",   # 22:30 in New York in winter (UTC-5)
+    "2027-07-15T02:30:00+00:00",   # 22:30 in New York in summer (UTC-4)
+])
+def test_local_time_quiet_hours_follow_daylight_saving(monkeypatch, when_utc):
+    import datetime
+    monkeypatch.setenv("TZ", "America/New_York")
+    time.tzset()
+    try:
+        m = Monitor(quiet_hours=(22, 8), tz_offset_min=None)   # None: the machine's local time, as it changes
+        now = datetime.datetime.fromisoformat(when_utc).timestamp()
+        m.apply("mac", {"type": "snapshot", "sessions": [sess(1, "waiting", idleSec=999)]}, now=now)
+        assert not m.display(now=now)["chime"], "22:30 local is quiet all year"
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+
+
+@pytest.mark.parametrize("value,want", [("local", None), ("-300", -300), ("330", 330)])
+def test_tz_offset_setting(monkeypatch, value, want):
+    for k, v in {"MAC_TOKENS": "m", "ROBOT_TOKEN": "r", "ROBOT_SECRET": "s", "TZ_OFFSET_MINUTES": value}.items():
+        monkeypatch.setenv(k, v)
+    assert config_from_env()["tz_offset_min"] == want
