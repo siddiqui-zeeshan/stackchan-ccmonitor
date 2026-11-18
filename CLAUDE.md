@@ -70,6 +70,7 @@ Do them in order, and tell the person what each one does before you run it.
 | Robot shows "Waiting for your Mac" forever | Check `~/Library/Logs/cc-ble.log`. If the robot was re-flashed, or the Mac forgot it: in System Settings > Bluetooth, remove "StackChan CC" if listed, restart the robot while plugged in, and run `./setup.sh --pair`. |
 | `Bluetooth not allowed` in cc-ble.log | Ask them to allow `cc-ble` in System Settings > Privacy & Security > Bluetooth, then run `launchctl kickstart -k gui/$(id -u)/dev.stackchan.cc-ble`. |
 | Robot shows "Not paired" | It isn't paired with any Mac. Plug it in by USB, restart it, and run `./setup.sh --pair`. |
+| `curl: (35) ... Connection reset` or another download error | Some networks (company VPNs, filters) block GitHub's file host. Ask them to download `stackchan-cc-ble.zip` from https://github.com/siddiqui-zeeshan/stackchan-ccmonitor/releases/tag/ble-v1 in a browser. Check it with `shasum -a 256 ~/Downloads/stackchan-cc-ble.zip`: the hash must equal the one in `firmware/ble-firmware.sha256`. Only if it matches, run `printf 'y\n' \| ./setup.sh --firmware ~/Downloads/stackchan-cc-ble.zip`. |
 | Checksum error during setup | The download is damaged or not the expected file. Try again. If it repeats, stop and tell them; don't bypass the check. |
 | Port 8810 in use | Ask them what the program is, and whether it may be stopped. Don't kill it yourself. |
 | Robot screen is blank or in the stock launcher | The flash didn't finish. Run `printf 'y\n' \| ./setup.sh` again (with their agreement to flash). |
