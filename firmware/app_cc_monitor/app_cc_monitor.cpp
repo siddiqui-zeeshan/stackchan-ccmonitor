@@ -19,7 +19,13 @@
  */
 #include "app_cc_monitor.h"
 #include "pix.h"          // colours and pixel drawing, shared with firmware/render
-#include "cc_monitor_config.h"   // CC_MONITOR_URL, CC_MONITOR_TOKEN (git-ignored, see the .example)
+#include "cc_monitor_config.h"   // CC_MONITOR_URL, CC_MONITOR_TOKEN, or CC_MONITOR_BLE (written by build.sh)
+#ifdef CC_MONITOR_BLE
+#include "cc_ble.h"   // Bluetooth build: talks to cc-ble on the paired Mac instead of the server
+static constexpr bool DISPLAY_ONLY = true;   // no Approve / Reject / Talk / focus, whatever the Mac sends
+#else
+static constexpr bool DISPLAY_ONLY = false;
+#endif
 #include <hal/hal.h>
 #include <hal/board/hal_bridge.h>
 #include <assets/assets.h>
@@ -102,6 +108,7 @@ static bool diff(lv_area_t& out)
 
 static std::mutex _rx_mutex;
 static std::deque<std::string> _rx_queue;   // server messages, applied on the UI loop
+static std::string _net_title = "Not connected";   // offline screen, first line
 static std::string _net_msg;             // Wi-Fi / connection progress text
 static std::atomic<bool> _running{false};
 static std::atomic<bool> _connected{false};
@@ -109,6 +116,7 @@ static std::atomic<bool> _task_alive{false};
 static std::mutex _tx_mutex;
 static std::unique_ptr<WebSocket> _ws;
 
+#ifndef CC_MONITOR_BLE
 static void ws_task(void*)
 {
     _task_alive = true;
@@ -163,11 +171,17 @@ static void ws_task(void*)
     _task_alive = false;
     vTaskDelete(nullptr);
 }
+#endif
 
 static void send_json(const std::string& s)
 {
     std::lock_guard<std::mutex> lock(_tx_mutex);
+#ifdef CC_MONITOR_BLE
+    if (s.rfind(R"({"type":"touch")", 0) != 0) return;   // display only: head-panel touches are all it sends
+    cc_ble::send(s);
+#else
     if (_ws && _ws->IsConnected()) _ws->Send(s);
+#endif
 }
 
 static std::string jstr(const std::string& s)
@@ -181,11 +195,53 @@ static std::string jstr(const std::string& s)
 
 static void send_touch(const char* gesture)
 {
-    std::lock_guard<std::mutex> lock(_tx_mutex);
-    if (_ws && _ws->IsConnected()) {
-        _ws->Send(std::string(R"({"type":"touch","gesture":")") + gesture + R"(","row":0})");
-    }
+    send_json(std::string(R"({"type":"touch","gesture":")") + gesture + R"(","row":0})");
 }
+
+#ifdef CC_MONITOR_BLE
+// Bluetooth build: what the offline screen says while the paired Mac isn't connected.
+static std::atomic<int> _ble_state{(int)cc_ble::State::NotPaired};
+static std::atomic<uint32_t> _passkey{0};
+
+static void ble_texts()
+{
+    auto st = (cc_ble::State)_ble_state.load();
+    uint32_t code = _passkey;
+    std::lock_guard<std::mutex> lock(_rx_mutex);
+    if (code) {
+        char buf[24];
+        snprintf(buf, sizeof(buf), "Code: %03u %03u", (unsigned)(code / 1000), (unsigned)(code % 1000));
+        _net_title = buf, _net_msg = "Type it on your Mac";
+    } else if (st == cc_ble::State::NotPaired) {
+        _net_title = "Not paired", _net_msg = "Plug into your Mac by USB, then restart me";
+    } else if (st == cc_ble::State::Pairing) {
+        _net_title = "Ready to pair", _net_msg = "Run ./setup.sh --pair on your Mac";
+    } else {
+        _net_title = "Waiting for your Mac", _net_msg = "Is it on and nearby?";
+    }
+    _connected = st == cc_ble::State::Connected;
+}
+
+static void ble_start()
+{
+    cc_ble::Events ev;
+    ev.on_message = [](std::string m) {
+        std::lock_guard<std::mutex> lock(_rx_mutex);
+        if (_rx_queue.size() >= 8) _rx_queue.pop_front();
+        _rx_queue.push_back(std::move(m));
+    };
+    ev.on_passkey = [](uint32_t code) {
+        _passkey = code;
+        ble_texts();
+    };
+    ev.on_state = [](cc_ble::State s) {
+        _ble_state = (int)s;
+        ble_texts();
+    };
+    ble_texts();
+    cc_ble::start(std::move(ev));
+}
+#endif
 
 // ------------------------------------------------------------------ small LVGL helpers
 
@@ -679,9 +735,13 @@ void AppCcMonitor::onOpen()
     });
 
     _running = true;
+#ifdef CC_MONITOR_BLE
+    ble_start();   // once; Bluetooth stays up while the app is closed
+#else
     if (!_task_alive) {
         xTaskCreate(ws_task, "cc_ws", 8192, nullptr, 4, nullptr);
     }
+#endif
 }
 
 void AppCcMonitor::buildUi()
@@ -842,7 +902,7 @@ void AppCcMonitor::applyDisplay(const std::string& body)
         row.cut          = r["cut"] | 0;
         row.state        = r["state"] | "";
         row.age_sec      = r["ageSec"] | 0;
-        row.ghostty      = r["ghostty"] | false;
+        row.ghostty      = !DISPLAY_ONLY && (r["ghostty"] | false);
         row.waiting_long = r["waitingLong"] | false;
         _rows.push_back(row);
     }
@@ -907,7 +967,7 @@ void AppCcMonitor::renderMain(bool advance)
     _shown_session.clear();
     if (_mood == "offline") {
         std::lock_guard<std::mutex> lock(_rx_mutex);
-        l1 = "Not connected";
+        l1 = _net_title;
         l2 = _net_msg.empty() ? "Starting Wi-Fi..." : _net_msg;
     } else {
         const char* want = (_mood == "needs_you" || _mood == "still_waiting") ? "needs_you" : _mood == "working" ? "working" : "";
@@ -974,7 +1034,7 @@ void AppCcMonitor::renderSheet()
             lv_obj_invalidate(_sheet_faces[i]);
         }
         // Name takes its natural width up to a limit, so "view only" can sit right after it.
-        const int limit = r.ghostty ? 150 : 86;
+        const int limit = r.ghostty || DISPLAY_ONLY ? 150 : 86;
         if (r.name != lv_label_get_text(_sheet_names[i])) {
             lv_obj_set_width(_sheet_names[i], LV_SIZE_CONTENT);
             lv_label_set_text(_sheet_names[i], r.name.c_str());
@@ -985,7 +1045,7 @@ void AppCcMonitor::renderSheet()
             lv_obj_set_width(_sheet_names[i], limit);
             w = limit;
         }
-        show(_sheet_tags[i], !r.ghostty);
+        show(_sheet_tags[i], !r.ghostty && !DISPLAY_ONLY);
         lv_obj_align(_sheet_tags[i], LV_ALIGN_LEFT_MID, 40 + w + 8, 0);
         const char* word = key == "needs" ? "needs you" : key == "waiting" ? "waiting" : key == "working" ? "working" : "ready";
         std::string d    = std::string(word) + "  " + fmt_age(r.age_sec + (GetHAL().millis() - _rx_ms) / 1000);
@@ -1308,7 +1368,7 @@ void AppCcMonitor::renderSession()
     show(_ss_approve, actions);
     show(_ss_talk, r->ghostty);
     show(_ss_focus, r->ghostty);
-    lv_label_set_text(_ss_note, r->ghostty ? "" : "Not in Ghostty: view only");
+    lv_label_set_text(_ss_note, r->ghostty || DISPLAY_ONLY ? "" : "Not in Ghostty: view only");
     if (_rec) {
         lv_label_set_text(_ss_talk_label, LV_SYMBOL_AUDIO "  Listening... release");
     } else if (_transcribing) {

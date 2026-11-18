@@ -10,3 +10,4 @@ firmware/.work/
 __pycache__/
 .pytest_cache/
 *.bin
+firmware/.work-ble/

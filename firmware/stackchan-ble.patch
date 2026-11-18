@@ -1,0 +1,74 @@
+diff --git a/firmware/main/apps/app_launcher/app_launcher.cpp b/firmware/main/apps/app_launcher/app_launcher.cpp
+index a8b7861..a34f43d 100644
+--- a/firmware/main/apps/app_launcher/app_launcher.cpp
++++ b/firmware/main/apps/app_launcher/app_launcher.cpp
+@@ -13,6 +13,8 @@
+ 
+ using namespace mooncake;
+ 
++extern int g_cc_monitor_app_id;   // main.cpp; CC Monitor Bluetooth build: opened at boot
++
+ void AppLauncher::onLauncherCreate()
+ {
+     mclog::tagInfo(getAppInfo().name, "on create");
+@@ -27,7 +29,13 @@ void AppLauncher::onLauncherOpen()
+ 
+     LvglLockGuard lock;
+ 
+-    if (!_startup_checked && GetHAL().consumeAppSetupRequest()) {
++    if (!_startup_checked) {
++        // CC Monitor Bluetooth build: skip the stock first-run setup (it needs the phone app over Bluetooth)
++        // and go straight to CC Monitor, so the robot comes back by itself after a power cut.
++        _startup_checked = true;
++        create_launcher_view();
++        openApp(g_cc_monitor_app_id);
++    } else if (!_startup_checked && GetHAL().consumeAppSetupRequest()) {
+         mclog::tagInfo(getAppInfo().name, "resume App setup after network/binding failure");
+         _startup_worker = std::make_unique<setup_workers::WifiSetupWorker>();
+     } else if (!_startup_checked && !GetHAL().isAppConfiged()) {
+diff --git a/firmware/main/hal/hal_ble.cpp b/firmware/main/hal/hal_ble.cpp
+index 4788231..ce23163 100644
+--- a/firmware/main/hal/hal_ble.cpp
++++ b/firmware/main/hal/hal_ble.cpp
+@@ -327,6 +327,10 @@ void Hal::ble_init(bool useAltUuid)
+ 
+ void Hal::startBleServer()
+ {
++    // CC Monitor Bluetooth build: the CC Monitor app owns Bluetooth (bonded, display only); the open stock
++    // characteristics stay off so nobody nearby can drive the robot without pairing.
++    mclog::tagInfo(_tag, "ble server disabled in the CC Monitor Bluetooth build");
++    return;
+     mclog::tagInfo(_tag, "start ble server");
+     ble_init(false);
+ }
+@@ -598,6 +602,8 @@ private:
+ 
+ void Hal::startAppConfigServer()
+ {
++    mclog::tagInfo(_tag, "app config server disabled in the CC Monitor Bluetooth build");
++    return;
+     if (_app_config_server_started) return;
+     _app_config_server_started = true;
+     mclog::tagInfo(_tag, "start app config server");
+diff --git a/firmware/main/main.cpp b/firmware/main/main.cpp
+index 54c8846..2276301 100644
+--- a/firmware/main/main.cpp
++++ b/firmware/main/main.cpp
+@@ -14,6 +14,8 @@
+ using namespace mooncake;
+ using namespace smooth_ui_toolkit;
+ 
++int g_cc_monitor_app_id = -1;
++
+ extern "C" void app_main(void)
+ {
+     // Setup logger
+@@ -41,7 +43,7 @@ extern "C" void app_main(void)
+                                      GetMooncake().installApp(std::make_unique<AppAppCenter>()));
+         hal_toggles::register_app_id(hal_toggles::App::Ezdata, GetMooncake().installApp(std::make_unique<AppEzdata>()));
+         hal_toggles::register_app_id(hal_toggles::App::Dance, GetMooncake().installApp(std::make_unique<AppDance>()));
+-        GetMooncake().installApp(std::make_unique<AppCcMonitor>());
++        g_cc_monitor_app_id = GetMooncake().installApp(std::make_unique<AppCcMonitor>());
+         GetMooncake().installApp(std::make_unique<AppSetup>());
+ 
+         // Main loop

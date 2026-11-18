@@ -107,6 +107,20 @@ void advertise()
     ESP_LOGI(TAG, "advertising%s", pairing ? " (pairing open)" : "");
 }
 
+// Delete every bond except `keep`'s: a new pairing replaces the previous Mac.
+void forget_others(const ble_addr_t& keep)
+{
+    ble_addr_t peers[4];
+    int n = 0;
+    if (ble_store_util_bonded_peers(peers, &n, 4) != 0) return;
+    for (int i = 0; i < n; i++) {
+        if (ble_addr_cmp(&peers[i], &keep) != 0) {
+            ESP_LOGI(TAG, "forgetting the previously paired Mac");
+            ble_store_util_delete_peer(&peers[i]);
+        }
+    }
+}
+
 void drop(uint16_t conn, const char* why)
 {
     ESP_LOGW(TAG, "dropping connection: %s", why);
@@ -175,6 +189,7 @@ int gap_event(ble_gap_event* event, void*)
                 drop(conn, "link not secure");
                 return 0;
             }
+            if (pairing_open()) forget_others(desc.peer_id_addr);   // one Mac at a time
             _secure = true;
             // Ask for a short connection interval (15-30 ms) so a full update arrives quickly.
             ble_gap_upd_params p = {};
@@ -207,8 +222,8 @@ int gap_event(ble_gap_event* event, void*)
     return 0;
 }
 
-// With one bond allowed, a second pairing overflows the store. Outside the pairing window that pairing must fail
-// instead of pushing out the paired Mac.
+// When the bond store is full, NimBLE would push out the oldest bond (the paired Mac) for a new pairing. Outside
+// the pairing window that pairing must fail instead.
 int store_status(ble_store_status_event* event, void* arg)
 {
     if (event->event_code == BLE_STORE_EVENT_OVERFLOW && !pairing_open()) return BLE_HS_ESTORE_CAP;

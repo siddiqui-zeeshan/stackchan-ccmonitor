@@ -2,6 +2,12 @@
 
 Shows every Claude Code session on your Macs on an M5Stack StackChan robot, and lets you answer them from it.
 
+> **This branch (`mac-direct-ble`): Bluetooth, no server.** The robot pairs with one Mac and talks to it over
+> Bluetooth; nothing else is needed (no Linux server, no Wi-Fi setup on the robot). It is **display only**:
+> moods, faces, the session list and details, chimes, and the head panel (tap, long press for quiet mode), but no
+> Approve, Reject, Talk or switching tabs. See [Bluetooth setup](#bluetooth-setup-this-branch) below. Everything
+> else in this README describes the Wi-Fi + server setup on `main`.
+
 - **Screen**: the whole screen takes the mood's colour, with a pixel face, one big number (how many sessions
   are in the most urgent state) and one plain sentence about the session that matters most, for example
   "fast-agent-prod wants to run / npm run deploy:staging". With several such sessions the sentence moves to the
@@ -110,6 +116,27 @@ robot's launcher.
 
 The patches also turn off the firmware's automatic self-update (so the robot doesn't replace this build) and
 raise the audio-decode task priority (fixes voice stutter). To go back to stock, flash the official firmware.
+
+## Bluetooth setup (this branch)
+
+How it fits together on the Mac: `cc-watch` (unchanged, Ghostty lookups off) → `server/cc_monitor.py`
+(unchanged, on 127.0.0.1 only) ← `cc-ble` (Swift, `mac/ble/`) ↔ Bluetooth ↔ the robot.
+
+- **Firmware:** `firmware/build.sh --ble` builds the Bluetooth variant in its own tree (`firmware/.work-ble`).
+  It has no address or secret in it, so one build fits every robot. Differences from the Wi-Fi build
+  (`firmware/stackchan-ble.patch` and `#ifdef CC_MONITOR_BLE` in the app):
+  - the robot opens CC Monitor at boot, skipping the stock launcher and first-run setup, so it comes back by
+    itself after a power cut;
+  - the stock Bluetooth services (phone app, Dance app remote, phone Wi-Fi setup) are off, so nobody nearby can
+    move the head or change the face;
+  - the app sends only head-panel touches and shows no action buttons, whatever the Mac sends;
+  - the link (`cc_ble.cpp`) accepts only a bonded, encrypted link authenticated with a 6-digit code shown on the
+    robot. A new Mac can pair only while the robot is plugged into a computer by USB and in the first 2 minutes
+    after CC Monitor starts. A new pairing replaces the previous Mac. Bonds survive restarts.
+- **Messages:** the same JSON as the server connection, split into packets with the stock StackChan 10-byte
+  header (`frames.h`, Mac side `mac/ble/Frames.swift`), up to 16 KB per message.
+- **Offline screen:** "Not paired" (plug in by USB and restart to pair), "Ready to pair", "Code: 123 456" while
+  pairing, "Waiting for your Mac" when paired but the Mac isn't there.
 
 ## Notes
 - The robot only draws what the server sends, so the rules live in `server/cc_monitor.py` and are covered by
