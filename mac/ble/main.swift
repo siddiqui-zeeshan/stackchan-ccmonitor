@@ -149,7 +149,9 @@ final class Robot: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             switch mode {
             case .pair:
                 log("looking for a robot that is ready to pair...")
-                c.scanForPeripherals(withServices: [serviceUUID])
+                // Duplicates on: a robot first seen before its pairing window opened is reported again.
+                c.scanForPeripherals(withServices: [serviceUUID],
+                                     options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
             case .run(let id):
                 if let p = c.retrievePeripherals(withIdentifiers: [id]).first {
                     peripheral = p

@@ -85,6 +85,24 @@ do {
     }
 }
 
+// Relay: what reaches the server is a touch message rebuilt from known fields, never the robot's raw text,
+// so a duplicate key (Swift keeps the first, Python the last) can't smuggle an action through.
+do {
+    let r = Relay()
+    let tap = #"{"gesture":"tap","row":0,"type":"touch"}"#
+    let cases: [(String, String?)] = [
+        (#"{"type":"touch","gesture":"tap","row":0}"#, tap),
+        (#"{"type":"touch","gesture":"long_press","row":0}"#, #"{"gesture":"long_press","row":0,"type":"touch"}"#),
+        (#"{"type":"touch","gesture":"tap","row":0,"type":"act","action":"approve","session":"s"}"#, tap),
+        (#"{"type":"touch","type":"act","action":"approve","session":"s"}"#, nil),
+        (#"{"type":"touch","gesture":"approve","row":0}"#, nil),
+        (#"{"type":"touch","gesture":"tap","row":"x"}"#, nil),
+    ]
+    for (msg, want) in cases {
+        check(r.fromRobot(msg) == want, "fromRobot \(msg) -> \(String(describing: r.fromRobot(msg)))")
+    }
+}
+
 // Relay: a robot that (re)connects gets the latest display at once.
 do {
     var r = Relay()

@@ -134,8 +134,14 @@ raise the audio-decode task priority (fixes voice stutter). To go back to stock,
 
 Other commands: `./setup.sh --pair` (pair again: plug in by USB and restart the robot first),
 `./setup.sh --uninstall`, `./setup.sh --firmware <zip>` (flash your own `firmware/build.sh --ble --package`
-build). The browser preview is at `http://127.0.0.1:8810/cc/preview`. Chimes are silent from 22:00 to 08:00 in
-the Mac's time zone (the server's `QUIET_HOURS` default). Logs: `~/Library/Logs/cc-monitor.log`, `cc-watch.log`,
+build; the release download is checked against `firmware/ble-firmware.sha256`, your own package is used as
+given). The browser preview is at `http://127.0.0.1:8810/cc/preview`. Chimes are silent from 22:00 to 08:00 in the
+Mac's time zone, following daylight saving (the server's `QUIET_HOURS` default, `TZ_OFFSET_MINUTES=local`).
+
+**If the robot shows "Waiting for your Mac" and never connects** (the robot was re-flashed or erased, or the Mac
+forgot it): in System Settings > Bluetooth, remove "StackChan CC" if listed, plug the robot into the Mac by USB,
+restart it, and run `./setup.sh --pair`. During `--pair` the Bluetooth permission prompt names the terminal app
+(the pairing runs in it); the background `cc-ble` has its own permission, asked the first time it runs. Logs: `~/Library/Logs/cc-monitor.log`, `cc-watch.log`,
 `cc-ble.log`. Tests: `sh tests/test_setup.sh`, `mac/ble/test.sh`, `firmware/tests/run.sh`.
 
 How it fits together on the Mac: `cc-watch` (unchanged, Ghostty lookups off) → `server/cc_monitor.py`
@@ -149,8 +155,8 @@ How it fits together on the Mac: `cc-watch` (unchanged, Ghostty lookups off) →
   - the stock Bluetooth services (phone app, Dance app remote, phone Wi-Fi setup) are off, so nobody nearby can
     move the head or change the face;
   - the app sends only head-panel touches and shows no action buttons, whatever the Mac sends;
-  - the link (`cc_ble.cpp`) accepts only a bonded, encrypted link authenticated with a 6-digit code shown on the
-    robot. A new Mac can pair only while the robot is plugged into a computer by USB and in the first 2 minutes
+  - the link (`cc_ble.cpp`) accepts one connection, and only a bonded, encrypted link (LE Secure Connections)
+    authenticated with a 6-digit code shown on the robot; subscribing to updates needs that link too. A new Mac can pair only while the robot is plugged into a computer by USB and in the first 2 minutes
     after CC Monitor starts. A new pairing replaces the previous Mac. Bonds survive restarts.
 - **Messages:** the same JSON as the server connection, split into packets with the stock StackChan 10-byte
   header (`frames.h`, Mac side `mac/ble/Frames.swift`), up to 16 KB per message.

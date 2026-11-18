@@ -39,7 +39,9 @@ Events _ev;
 uint16_t _chr_handle = 0;
 uint8_t _own_addr_type = 0;
 int64_t _start_us = 0;
-std::atomic<uint16_t> _conn{BLE_HS_CONN_HANDLE_NONE};
+std::atomic<uint16_t> _conn{BLE_HS_CONN_HANDLE_NONE};   // the one connection we serve
+uint16_t _paired_conn = BLE_HS_CONN_HANDLE_NONE;        // the connection that showed a code (host task only)
+ble_npl_callout _tick;                                  // once a second, on the host task
 std::atomic<bool> _secure{false};       // encrypted, authenticated and bonded
 std::atomic<bool> _subscribed{false};
 std::atomic<int> _advertised_pairing{-1};   // what the current advertisement says (-1 = not advertising)
@@ -136,6 +138,10 @@ int gap_event(ble_gap_event* event, void*)
                 advertise();
                 return 0;
             }
+            if (_conn != BLE_HS_CONN_HANDLE_NONE) {   // one at a time (also capped in sdkconfig)
+                drop(event->connect.conn_handle, "already connected");
+                return 0;
+            }
             _conn       = event->connect.conn_handle;
             _secure     = false;
             _subscribed = false;
@@ -151,6 +157,8 @@ int gap_event(ble_gap_event* event, void*)
 
         case BLE_GAP_EVENT_DISCONNECT:
             ESP_LOGI(TAG, "disconnected: %d", event->disconnect.reason);
+            if (event->disconnect.conn.conn_handle != _conn) return 0;   // a refused extra connection
+            if (_paired_conn == _conn) _paired_conn = BLE_HS_CONN_HANDLE_NONE;
             _conn       = BLE_HS_CONN_HANDLE_NONE;
             _secure     = false;
             _subscribed = false;
@@ -169,6 +177,7 @@ int gap_event(ble_gap_event* event, void*)
             io.action    = BLE_SM_IOACT_DISP;
             io.passkey   = 1 + esp_random() % 999999;   // never 0: on_passkey(0) means pairing is over
             ble_sm_inject_io(conn, &io);
+            _paired_conn = conn;
             ESP_LOGI(TAG, "pairing: showing a code");
             if (_ev.on_passkey) _ev.on_passkey(io.passkey);
             return 0;
@@ -189,7 +198,9 @@ int gap_event(ble_gap_event* event, void*)
                 drop(conn, "link not secure");
                 return 0;
             }
-            if (pairing_open()) forget_others(desc.peer_id_addr);   // one Mac at a time
+            // One Mac at a time: a pairing made on this connection (the code was shown inside the window, even if
+            // it was typed after the window closed) replaces the previous Mac.
+            if (conn == _paired_conn) forget_others(desc.peer_id_addr);
             _secure = true;
             // Ask for a short connection interval (15-30 ms) so a full update arrives quickly.
             ble_gap_upd_params p = {};
@@ -256,8 +267,11 @@ const ble_gatt_chr_def CHRS[] = {
         .access_cb  = chr_access,
         .arg        = nullptr,
         .descriptors = nullptr,
+        // Writing and subscribing both need an encrypted, authenticated link, so a successful subscribe on the
+        // Mac means the link is ready.
         .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_WRITE_ENC |
-                 BLE_GATT_CHR_F_WRITE_AUTHEN | BLE_GATT_CHR_F_NOTIFY,
+                 BLE_GATT_CHR_F_WRITE_AUTHEN | BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_NOTIFY_INDICATE_ENC |
+                 BLE_GATT_CHR_F_NOTIFY_INDICATE_AUTHEN,
         .min_key_size = 16,
         .val_handle   = &_chr_handle,
     },
@@ -283,11 +297,13 @@ void host_task(void*)
     nimble_port_freertos_deinit();
 }
 
-void tick(void*)   // once a second: the pairing window opens/closes with USB and time
+void tick(ble_npl_event*)   // once a second, on the host task: the pairing window opens/closes with USB and time
 {
-    if (!ble_hs_synced()) return;
-    report_state();
-    advertise();
+    if (ble_hs_synced()) {
+        report_state();
+        advertise();
+    }
+    ble_npl_callout_reset(&_tick, ble_npl_time_ms_to_ticks32(1000));
 }
 
 }   // namespace
@@ -310,6 +326,7 @@ void start(Events ev)
     ble_hs_cfg.sm_bonding      = 1;
     ble_hs_cfg.sm_mitm         = 1;
     ble_hs_cfg.sm_sc           = 1;
+    ble_hs_cfg.sm_sc_only      = 1;   // LE Secure Connections only: no legacy pairing
     ble_hs_cfg.sm_our_key_dist   = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
 
@@ -319,14 +336,9 @@ void start(Events ev)
     ble_gatts_add_svcs(SVCS);
     ble_svc_gap_device_name_set("StackChan CC");
     ble_store_config_init();
+    ble_npl_callout_init(&_tick, nimble_port_get_dflt_eventq(), tick, nullptr);
+    ble_npl_callout_reset(&_tick, ble_npl_time_ms_to_ticks32(1000));
     nimble_port_freertos_init(host_task);
-
-    static esp_timer_handle_t timer;
-    esp_timer_create_args_t args = {};
-    args.callback = tick;
-    args.name     = "cc_ble_tick";
-    esp_timer_create(&args, &timer);
-    esp_timer_start_periodic(timer, 1000 * 1000);
 }
 
 bool send(const std::string& json)

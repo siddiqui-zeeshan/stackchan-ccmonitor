@@ -73,6 +73,7 @@ if [ "$BLE" = 1 ]; then
   }
   set_cfg CONFIG_BT_NIMBLE_NVS_PERSIST y
   set_cfg CONFIG_BT_NIMBLE_MAX_BONDS 2
+  set_cfg CONFIG_BT_NIMBLE_MAX_CONNECTIONS 1   # the paired Mac only
 fi
 
 idf build
