@@ -121,6 +121,10 @@ raise the audio-decode task priority (fixes voice stutter). To go back to stock,
 
 **Install** (on the Mac the robot will sit next to; Claude Code sessions on this Mac are shown):
 
+Using Claude Code? Open this folder in it and ask it to set the robot up: `CLAUDE.md` walks it through the steps
+below, the checks, and what to do when something goes wrong.
+
+
 1. `xcode-select --install` (once; gives the compilers and Python 3 that setup needs).
 2. `git clone -b mac-direct-ble https://github.com/siddiqui-zeeshan/stackchan-ccmonitor && cd stackchan-ccmonitor`
 3. Plug the robot into the Mac by USB and run `./setup.sh`. It:
