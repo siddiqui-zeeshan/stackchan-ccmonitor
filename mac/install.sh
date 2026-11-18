@@ -28,7 +28,8 @@ fi
 mkdir -p "$HOME/Applications" "$HOME/.config/cc-watch" "$HOME/Library/LaunchAgents"
 cp "$SRC" "$BIN"
 umask 077
-printf '{"server":"%s","token":"%s","ghostty":true}\n' "$1" "$2" > "$HOME/.config/cc-watch/config.json"
+# GHOSTTY=false: never look up Ghostty tabs (no Automation prompt; every session is view-only). Used by setup.sh.
+printf '{"server":"%s","token":"%s","ghostty":%s}\n' "$1" "$2" "${GHOSTTY:-true}" > "$HOME/.config/cc-watch/config.json"
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

@@ -119,6 +119,25 @@ raise the audio-decode task priority (fixes voice stutter). To go back to stock,
 
 ## Bluetooth setup (this branch)
 
+**Install** (on the Mac the robot will sit next to; Claude Code sessions on this Mac are shown):
+
+1. `xcode-select --install` (once; gives the compilers and Python 3 that setup needs).
+2. `git clone -b mac-direct-ble https://github.com/siddiqui-zeeshan/stackchan-ccmonitor && cd stackchan-ccmonitor`
+3. Plug the robot into the Mac by USB and run `./setup.sh`. It:
+   - sets up the server (a Python venv in `~/Library/Application Support/cc-monitor`), `cc-watch` and `cc-ble`
+     as LaunchAgents, with fresh random tokens in `~/.config/cc-monitor` (kept on re-runs);
+   - downloads the robot firmware from the `ble-v1` release, checks it against `firmware/ble-firmware.sha256`,
+     and asks before flashing it;
+   - pairs: the robot restarts into CC Monitor and shows a 6-digit code; macOS asks for it (and, the first
+     time, whether cc-ble may use Bluetooth).
+4. The robot can then stay on the Mac's USB for power or be unplugged.
+
+Other commands: `./setup.sh --pair` (pair again: plug in by USB and restart the robot first),
+`./setup.sh --uninstall`, `./setup.sh --firmware <zip>` (flash your own `firmware/build.sh --ble --package`
+build). The browser preview is at `http://127.0.0.1:8810/cc/preview`. Chimes are silent from 22:00 to 08:00 in
+the Mac's time zone (the server's `QUIET_HOURS` default). Logs: `~/Library/Logs/cc-monitor.log`, `cc-watch.log`,
+`cc-ble.log`. Tests: `sh tests/test_setup.sh`, `mac/ble/test.sh`, `firmware/tests/run.sh`.
+
 How it fits together on the Mac: `cc-watch` (unchanged, Ghostty lookups off) → `server/cc_monitor.py`
 (unchanged, on 127.0.0.1 only) ← `cc-ble` (Swift, `mac/ble/`) ↔ Bluetooth ↔ the robot.
 
