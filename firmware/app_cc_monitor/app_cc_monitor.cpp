@@ -178,7 +178,8 @@ static void send_json(const std::string& s)
     std::lock_guard<std::mutex> lock(_tx_mutex);
 #ifdef CC_MONITOR_BLE
     if (s.rfind(R"({"type":"touch")", 0) != 0) return;   // display only: head-panel touches are all it sends
-    cc_ble::send(s);
+    bool ok = cc_ble::send(s);
+    mclog::tagInfo(_tag, "sent {}: {}", s, ok ? "ok" : "not sent (Mac not connected)");
 #else
     if (_ws && _ws->IsConnected()) _ws->Send(s);
 #endif

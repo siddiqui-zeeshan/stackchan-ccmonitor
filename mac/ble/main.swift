@@ -305,7 +305,12 @@ if CommandLine.arguments.contains("--pair") {
         if let d = relay.robotConnected() { robot.send(d) }
     }
     robot.onMessage = { text in
-        if let out = relay.fromRobot(text) { server.send(out) }
+        if let out = relay.fromRobot(text) {
+            log("robot: \(out)")
+            server.send(out)
+        } else {
+            log("robot sent something other than a head-panel touch; dropped")
+        }
     }
     log("starting: server \(cfg.server.replacingOccurrences(of: #"/[^/]+/cc/robot"#, with: "/…/cc/robot", options: .regularExpression))")
     server.connect()

@@ -163,9 +163,9 @@ int gap_event(ble_gap_event* event, void*)
                 drop(event->connect.conn_handle, "already connected");
                 return 0;
             }
+            // _secure and _subscribed were cleared at the last disconnect. Don't clear them here: for a paired Mac,
+            // encryption and its restored subscription can be reported before this event.
             _conn       = event->connect.conn_handle;
-            _secure     = false;
-            _subscribed = false;
             _joiner     = frames::Joiner();
             _advertised_pairing = -1;
             ESP_LOGI(TAG, "connected");
@@ -238,7 +238,10 @@ int gap_event(ble_gap_event* event, void*)
             return BLE_GAP_REPEAT_PAIRING_RETRY;
 
         case BLE_GAP_EVENT_SUBSCRIBE:
-            if (event->subscribe.attr_handle == _chr_handle) _subscribed = event->subscribe.cur_notify;
+            if (event->subscribe.attr_handle == _chr_handle) {
+                _subscribed = event->subscribe.cur_notify;
+                ESP_LOGI(TAG, "updates %s (reason %d)", _subscribed ? "on" : "off", event->subscribe.reason);
+            }
             return 0;
 
         case BLE_GAP_EVENT_MTU:
@@ -364,10 +367,18 @@ bool send(const std::string& json)
 {
     std::lock_guard<std::mutex> lock(_send_mutex);
     const uint16_t conn = _conn;
-    if (!_secure || !_subscribed || conn == BLE_HS_CONN_HANDLE_NONE) return false;
+    if (!_secure || !_subscribed || conn == BLE_HS_CONN_HANDLE_NONE) {
+        ESP_LOGW(TAG, "not sent: secure=%d updates=%d connected=%d", (int)_secure, (int)_subscribed,
+                 conn != BLE_HS_CONN_HANDLE_NONE);
+        return false;
+    }
     for (const auto& p : frames::split(json, ble_att_mtu(conn) - 3)) {
         os_mbuf* om = ble_hs_mbuf_from_flat(p.data(), p.size());
-        if (!om || ble_gatts_notify_custom(conn, _chr_handle, om) != 0) return false;
+        int rc      = om ? ble_gatts_notify_custom(conn, _chr_handle, om) : BLE_HS_ENOMEM;
+        if (rc != 0) {
+            ESP_LOGW(TAG, "notify failed: %d", rc);
+            return false;
+        }
     }
     return true;
 }
