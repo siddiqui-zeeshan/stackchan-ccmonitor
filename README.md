@@ -55,6 +55,8 @@ Mac(s): cc-watch ──ws──▶ server: cc-monitor ◀──ws── robot: C
 Mac monitor tests live in `mac-rs/src/main.rs` (`cd mac-rs && cargo test`): transcript summaries, Ghostty
 tab matching, and connecting (token header, giving up on a server that never answers).
 `firmware/render/render.sh --check` fails if `server/faces/` no longer matches the robot's drawing code.
+`firmware/tests/run.sh` tests the robot code that builds on a Mac: Bluetooth packet splitting and the
+pairing rule (`firmware/app_cc_monitor/frames.h`).
 
 ## Setup
 
