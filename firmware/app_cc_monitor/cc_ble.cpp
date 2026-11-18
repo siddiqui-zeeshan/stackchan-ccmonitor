@@ -123,6 +123,27 @@ void forget_others(const ble_addr_t& keep)
     }
 }
 
+bool is_secure(const ble_gap_conn_desc& d)
+{
+    return d.sec_state.encrypted && d.sec_state.authenticated && d.sec_state.bonded;
+}
+
+// The link to `conn` is now encrypted, authenticated and bonded.
+void secured(uint16_t conn, const ble_gap_conn_desc& desc)
+{
+    if (_secure) return;
+    // One Mac at a time: a pairing made on this connection (the code was shown inside the window, even if it was
+    // typed after the window closed) replaces the previous Mac.
+    if (conn == _paired_conn) forget_others(desc.peer_id_addr);
+    _secure = true;
+    ESP_LOGI(TAG, "secure link");
+    // Ask for a short connection interval (15-30 ms) so a full update arrives quickly.
+    ble_gap_upd_params p = {};
+    p.itvl_min = 12, p.itvl_max = 24, p.latency = 0, p.supervision_timeout = 400;
+    ble_gap_update_params(conn, &p);
+    report_state();
+}
+
 void drop(uint16_t conn, const char* why)
 {
     ESP_LOGW(TAG, "dropping connection: %s", why);
@@ -152,7 +173,13 @@ int gap_event(ble_gap_event* event, void*)
                 drop(_conn, "not paired and pairing is closed");
                 return 0;
             }
-            ble_gap_security_initiate(_conn);
+            // A paired Mac often encrypts the link itself before this event arrives; asking again on an
+            // encrypted link is never answered and times out 30 s later.
+            if (ble_gap_conn_find(_conn, &desc) == 0 && is_secure(desc)) {
+                secured(_conn, desc);
+            } else {
+                ble_gap_security_initiate(_conn);
+            }
             return 0;
 
         case BLE_GAP_EVENT_DISCONNECT:
@@ -187,26 +214,18 @@ int gap_event(ble_gap_event* event, void*)
             if (_ev.on_passkey) _ev.on_passkey(0);
             const uint16_t conn = event->enc_change.conn_handle;
             if (ble_gap_conn_find(conn, &desc) != 0) return 0;
-            const bool ok = event->enc_change.status == 0 && desc.sec_state.encrypted &&
-                            desc.sec_state.authenticated && desc.sec_state.bonded;
             ESP_LOGI(TAG, "encryption: status=%d encrypted=%d authenticated=%d bonded=%d", event->enc_change.status,
                      desc.sec_state.encrypted, desc.sec_state.authenticated, desc.sec_state.bonded);
-            if (!ok) {
-                if (event->enc_change.status == 0 && !desc.sec_state.authenticated) {
+            // What counts is the link's state, not this event's status: a repeated security request that timed out
+            // leaves an already secure link secure.
+            if (!is_secure(desc)) {
+                if (event->enc_change.status == 0 && desc.sec_state.encrypted && !desc.sec_state.authenticated) {
                     ble_store_util_delete_peer(&desc.peer_id_addr);   // never keep an unauthenticated bond
                 }
                 drop(conn, "link not secure");
                 return 0;
             }
-            // One Mac at a time: a pairing made on this connection (the code was shown inside the window, even if
-            // it was typed after the window closed) replaces the previous Mac.
-            if (conn == _paired_conn) forget_others(desc.peer_id_addr);
-            _secure = true;
-            // Ask for a short connection interval (15-30 ms) so a full update arrives quickly.
-            ble_gap_upd_params p = {};
-            p.itvl_min = 12, p.itvl_max = 24, p.latency = 0, p.supervision_timeout = 400;
-            ble_gap_update_params(conn, &p);
-            report_state();
+            if (conn == _conn) secured(conn, desc);   // else CONNECT, still to come, finds it secure
             return 0;
         }
 
